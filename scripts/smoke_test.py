@@ -170,8 +170,10 @@ def run() -> None:
             descriptor = [0.1767767] * 32
             candidate_ids = [uuid.uuid4().hex, uuid.uuid4().hex]
             with store.connect() as db:
-                db.execute("INSERT INTO analyses VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
-                           (second_analysis, second["id"], "00:00:04", "clip", "", "SYNTH-2", 5,
+                db.execute("""INSERT INTO analyses(id,clip_id,transaction_time,time_mode,clip_start_time,transaction_ref,
+                              case_ref,window_seconds,status,result_json,error,created_at,updated_at)
+                              VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                           (second_analysis, second["id"], "00:00:04", "clip", "", "SYNTH-2", "FIR-TEST-01", 5,
                             "completed", "{}", "", stamp, stamp))
                 for candidate_id, clip_id, analysis_fk in [
                     (candidate_ids[0], clip["id"], analysis_id),
@@ -191,6 +193,53 @@ def run() -> None:
             assert "not identity verification" in search.json()["notice"]
             pdf = client.get(f"/api/evidence/{analysis_id}.pdf")
             assert pdf.status_code == 200 and pdf.content.startswith(b"%PDF")
+            enhanced_res = client.get(f"/api/candidates/{candidate_ids[0]}/enhanced")
+            assert enhanced_res.status_code == 200 and enhanced_res.headers.get("x-forensic-enhancement")
+            redacted_res = client.get(f"/api/candidates/{candidate_ids[0]}/frame-redacted")
+            assert redacted_res.status_code == 200 and redacted_res.content[:2] == b"\xff\xd8"
+
+            manifest_res = client.get(f"/api/evidence/{analysis_id}/manifest.json")
+            assert manifest_res.status_code == 200
+            manifest_json = manifest_res.json()
+            assert manifest_json["seal"]["algorithm"] == "HMAC-SHA256"
+            assert client.post("/api/security/verify-manifest", headers={"X-CSRF-Token": csrf}, json={"manifest": manifest_json}).json()["verified"] is True
+            tampered_manifest = json.loads(json.dumps(manifest_json))
+            tampered_manifest["caseRef"] = "TAMPERED"
+            assert client.post("/api/security/verify-manifest", headers={"X-CSRF-Token": csrf}, json={"manifest": tampered_manifest}).json()["verified"] is False
+
+            assert client.get("/api/dvr-guidance").status_code == 200
+            streams_res = client.get("/api/streams")
+            assert streams_res.status_code == 200 and len(streams_res.json()["streams"]) == 4
+            assert client.get("/api/streams/CAM-01/frame.jpg").status_code == 200
+            assert client.post("/api/streams/CAM-01/source", headers={"X-CSRF-Token": csrf}, json={"source": "bad://url"}).status_code == 422
+            assert client.post("/api/streams/CAM-01/source", headers={"X-CSRF-Token": csrf}, json={"source": "http://127.0.0.1:8080/video"}).status_code == 200
+            assert client.post("/api/streams/CAM-01/source", headers={"X-CSRF-Token": csrf}, json={"source": "default"}).status_code == 200
+            assert client.post("/api/streams/toggle", headers={"X-CSRF-Token": csrf}, json={"running": True}).json()["running"] is True
+            assert client.post("/api/streams/toggle", headers={"X-CSRF-Token": csrf}, json={"running": False}).json()["running"] is False
+
+            journal_res = client.post(
+                "/api/journal/match",
+                headers={"X-CSRF-Token": csrf},
+                json={
+                    "clip_id": clip["id"],
+                    "clip_start_time": "2026-11-26T14:20:00+00:00",
+                    "csv_text": "timestamp,txn_ref,atm_id,status\n2026-11-26T14:20:03+00:00,TXN-1,ATM-02,DISPUTED\n",
+                    "window_seconds": 5,
+                    "auto_queue": False,
+                },
+            )
+            assert journal_res.status_code == 200 and journal_res.json()["inClipCount"] == 1
+            assert client.get("/api/audit/export?format=csv").status_code == 200
+            assert client.get("/api/audit/export?format=json").status_code == 200
+            wl = client.post("/api/watchlist", headers={"X-CSRF-Token": csrf}, json={"candidate_id": candidate_ids[0], "label": "Suspect-Demo", "case_ref": "FIR-1"})
+            assert wl.status_code == 201
+            wl_id = wl.json()["id"]
+            assert len(client.get("/api/watchlist").json()) == 1
+            assert client.get(f"/api/watchlist/{wl_id}/image").status_code == 200
+            journey = client.get("/api/cases/journey")
+            assert journey.status_code == 200 and "readinessScore" in journey.json()
+            assert client.delete(f"/api/watchlist/{wl_id}", headers={"X-CSRF-Token": csrf}).status_code == 200
+            assert client.post("/api/events/clear-stream-alerts", headers={"X-CSRF-Token": csrf}).status_code == 200
             backup = client.post("/api/security/database-backups", headers={"X-CSRF-Token": csrf}, json={"passphrase": "SecureBackupPassphrase2026"})
             assert backup.status_code == 201, backup.text
             encrypted_copy = client.get(backup.json()["downloadUrl"])

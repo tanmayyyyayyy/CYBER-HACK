@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-import json
-import hashlib
 import contextvars
+import hashlib
+import json
 import os
 import sqlite3
 import uuid
@@ -15,7 +15,9 @@ DATA = Path(os.environ.get("DRISHTI_DATA_DIR", ROOT / "backend" / "data")).resol
 UPLOADS = DATA / "uploads"
 CANDIDATES = DATA / "candidates"
 BACKUPS = DATA / "backups"
+DEMO_FEEDS = ROOT / "demo_feeds"
 DB_PATH = DATA / "drishti.sqlite3"
+SIGNING_KEY_PATH = DATA / "signing.key"
 AUDIT_ACTOR: contextvars.ContextVar[str] = contextvars.ContextVar("drishti_audit_actor", default="")
 
 
@@ -61,6 +63,7 @@ def init_db() -> None:
                 preview_ready INTEGER NOT NULL DEFAULT 1,
                 sha256 TEXT NOT NULL,
                 analysis_sha256 TEXT NOT NULL,
+                forensics_json TEXT NOT NULL DEFAULT '{}',
                 uploaded_at TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS analyses (
@@ -70,6 +73,7 @@ def init_db() -> None:
                 time_mode TEXT NOT NULL DEFAULT 'clip',
                 clip_start_time TEXT NOT NULL DEFAULT '',
                 transaction_ref TEXT NOT NULL DEFAULT '',
+                case_ref TEXT NOT NULL DEFAULT '',
                 window_seconds INTEGER NOT NULL,
                 status TEXT NOT NULL,
                 result_json TEXT NOT NULL DEFAULT '{}',
@@ -92,6 +96,7 @@ def init_db() -> None:
                 flags_json TEXT NOT NULL DEFAULT '[]',
                 image_path TEXT NOT NULL,
                 descriptor_json TEXT NOT NULL,
+                bbox_json TEXT NOT NULL DEFAULT '[]',
                 review_status TEXT NOT NULL DEFAULT 'unreviewed',
                 note TEXT NOT NULL DEFAULT ''
             );
@@ -104,6 +109,26 @@ def init_db() -> None:
                 severity TEXT NOT NULL,
                 occurred_at TEXT NOT NULL,
                 details_json TEXT NOT NULL DEFAULT '{}'
+            );
+            CREATE TABLE IF NOT EXISTS stream_detections (
+                id TEXT PRIMARY KEY,
+                camera_id TEXT NOT NULL,
+                track_id INTEGER NOT NULL,
+                person_count INTEGER NOT NULL,
+                confidence REAL NOT NULL,
+                alert_kind TEXT NOT NULL DEFAULT '',
+                occurred_at TEXT NOT NULL,
+                details_json TEXT NOT NULL DEFAULT '{}'
+            );
+            CREATE TABLE IF NOT EXISTS case_watchlist (
+                id TEXT PRIMARY KEY,
+                label TEXT NOT NULL,
+                case_ref TEXT NOT NULL DEFAULT '',
+                candidate_id TEXT NOT NULL DEFAULT '',
+                clip_id TEXT NOT NULL DEFAULT '',
+                embedding_json TEXT NOT NULL,
+                image_path TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS audit_log (
                 id TEXT PRIMARY KEY,
@@ -157,23 +182,30 @@ def init_db() -> None:
             CREATE INDEX IF NOT EXISTS idx_analyses_created ON analyses(created_at DESC);
             CREATE INDEX IF NOT EXISTS idx_candidates_analysis ON candidates(analysis_id, score DESC);
             CREATE INDEX IF NOT EXISTS idx_events_time ON events(occurred_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_stream_detections_time ON stream_detections(occurred_at DESC);
             CREATE INDEX IF NOT EXISTS idx_audit_time ON audit_log(occurred_at DESC);
             """
         )
-        columns = {row[1] for row in db.execute("PRAGMA table_info(clips)")}
-        migrations = {
+        clip_columns = {row[1] for row in db.execute("PRAGMA table_info(clips)")}
+        for col, stmt in {
             "source_path": "ALTER TABLE clips ADD COLUMN source_path TEXT NOT NULL DEFAULT ''",
             "sha256": "ALTER TABLE clips ADD COLUMN sha256 TEXT NOT NULL DEFAULT ''",
             "analysis_sha256": "ALTER TABLE clips ADD COLUMN analysis_sha256 TEXT NOT NULL DEFAULT ''",
-        }
-        for column, statement in migrations.items():
-            if column not in columns:
-                db.execute(statement)
-        clip_columns = {row[1] for row in db.execute("PRAGMA table_info(clips)")}
-        if "playback_codec" not in clip_columns:
-            db.execute("ALTER TABLE clips ADD COLUMN playback_codec TEXT NOT NULL DEFAULT 'unknown'")
-        if "preview_ready" not in clip_columns:
-            db.execute("ALTER TABLE clips ADD COLUMN preview_ready INTEGER NOT NULL DEFAULT 1")
+            "playback_codec": "ALTER TABLE clips ADD COLUMN playback_codec TEXT NOT NULL DEFAULT 'unknown'",
+            "preview_ready": "ALTER TABLE clips ADD COLUMN preview_ready INTEGER NOT NULL DEFAULT 1",
+            "forensics_json": "ALTER TABLE clips ADD COLUMN forensics_json TEXT NOT NULL DEFAULT '{}'",
+        }.items():
+            if col not in clip_columns:
+                db.execute(stmt)
+
+        analysis_columns = {row[1] for row in db.execute("PRAGMA table_info(analyses)")}
+        if "case_ref" not in analysis_columns:
+            db.execute("ALTER TABLE analyses ADD COLUMN case_ref TEXT NOT NULL DEFAULT ''")
+
+        cand_columns = {row[1] for row in db.execute("PRAGMA table_info(candidates)")}
+        if "bbox_json" not in cand_columns:
+            db.execute("ALTER TABLE candidates ADD COLUMN bbox_json TEXT NOT NULL DEFAULT '[]'")
+
         audit_columns = {row[1] for row in db.execute("PRAGMA table_info(audit_log)")}
         if "previous_hash" not in audit_columns:
             db.execute("ALTER TABLE audit_log ADD COLUMN previous_hash TEXT NOT NULL DEFAULT ''")
@@ -184,22 +216,25 @@ def init_db() -> None:
             old_attempts = db.execute("SELECT email,attempted_at FROM auth_attempts").fetchall()
             db.execute("ALTER TABLE auth_attempts RENAME TO auth_attempts_legacy")
             db.execute("CREATE TABLE auth_attempts(identifier_hash TEXT NOT NULL,attempted_at TEXT NOT NULL)")
-            db.executemany("INSERT INTO auth_attempts(identifier_hash,attempted_at) VALUES(?,?)",
-                           [(hashlib.sha256(str(row["email"]).strip().lower().encode()).hexdigest(), row["attempted_at"])
-                            for row in old_attempts])
+            db.executemany(
+                "INSERT INTO auth_attempts(identifier_hash,attempted_at) VALUES(?,?)",
+                [
+                    (hashlib.sha256(str(row["email"]).strip().lower().encode()).hexdigest(), row["attempted_at"])
+                    for row in old_attempts
+                ],
+            )
             db.execute("DROP TABLE auth_attempts_legacy")
         db.execute("CREATE INDEX IF NOT EXISTS idx_auth_attempts_time ON auth_attempts(identifier_hash,attempted_at)")
-        # Existing records are chained once during migration; new records use append_audit().
+
         previous_hash = ""
         for row in db.execute("SELECT * FROM audit_log ORDER BY rowid").fetchall():
             if row["entry_hash"]:
                 previous_hash = row["entry_hash"]
                 continue
             entry_hash = audit_digest(row["id"], row["action"], row["subject_id"], row["note"], row["occurred_at"], previous_hash)
-            db.execute("UPDATE audit_log SET previous_hash=?,entry_hash=? WHERE id=?",
-                       (previous_hash, entry_hash, row["id"]))
+            db.execute("UPDATE audit_log SET previous_hash=?,entry_hash=? WHERE id=?", (previous_hash, entry_hash, row["id"]))
             previous_hash = entry_hash
-        # Upgrade older local prototype records in place without discarding footage.
+
         for row in db.execute("SELECT id,path,source_path,sha256,analysis_sha256 FROM clips").fetchall():
             source_path = row["source_path"] or row["path"]
             try:
@@ -210,9 +245,11 @@ def init_db() -> None:
                 digest = hasher.hexdigest()
             except OSError:
                 digest = ""
-            db.execute("""UPDATE clips SET source_path=?,sha256=CASE WHEN sha256='' THEN ? ELSE sha256 END,
-                         analysis_sha256=CASE WHEN analysis_sha256='' THEN ? ELSE analysis_sha256 END WHERE id=?""",
-                       (source_path, digest, digest, row["id"]))
+            db.execute(
+                """UPDATE clips SET source_path=?,sha256=CASE WHEN sha256='' THEN ? ELSE sha256 END,
+                   analysis_sha256=CASE WHEN analysis_sha256='' THEN ? ELSE analysis_sha256 END WHERE id=?""",
+                (source_path, digest, digest, row["id"]),
+            )
 
 
 def row_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
@@ -228,15 +265,29 @@ def json_load(value: str, default: Any) -> Any:
 
 def audit_digest(entry_id: str, action: str, subject_id: str, note: str, occurred_at: str, previous_hash: str) -> str:
     payload = json.dumps(
-        {"id": entry_id, "action": action, "subject_id": subject_id, "note": note,
-         "occurred_at": occurred_at, "previous_hash": previous_hash},
-        ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        {
+            "id": entry_id,
+            "action": action,
+            "subject_id": subject_id,
+            "note": note,
+            "occurred_at": occurred_at,
+            "previous_hash": previous_hash,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
     ).encode("utf-8")
     return hashlib.sha256(payload).hexdigest()
 
 
-def append_audit(db: sqlite3.Connection, action: str, subject_id: str, note: str, occurred_at: str | None = None,
-                 actor_id: str | None = None) -> str:
+def append_audit(
+    db: sqlite3.Connection,
+    action: str,
+    subject_id: str,
+    note: str,
+    occurred_at: str | None = None,
+    actor_id: str | None = None,
+) -> str:
     stamp = occurred_at or datetime.now(timezone.utc).isoformat(timespec="seconds")
     actor = actor_id or AUDIT_ACTOR.get()
     if actor and f"operator={actor}" not in note:
@@ -245,8 +296,10 @@ def append_audit(db: sqlite3.Connection, action: str, subject_id: str, note: str
     previous_hash = previous[0] if previous else ""
     entry_id = uuid.uuid4().hex
     entry_hash = audit_digest(entry_id, action, subject_id, note, stamp, previous_hash)
-    db.execute("INSERT INTO audit_log(id,action,subject_id,note,occurred_at,previous_hash,entry_hash) VALUES(?,?,?,?,?,?,?)",
-               (entry_id, action, subject_id, note, stamp, previous_hash, entry_hash))
+    db.execute(
+        "INSERT INTO audit_log(id,action,subject_id,note,occurred_at,previous_hash,entry_hash) VALUES(?,?,?,?,?,?,?)",
+        (entry_id, action, subject_id, note, stamp, previous_hash, entry_hash),
+    )
     return entry_id
 
 
@@ -256,9 +309,17 @@ def verify_audit(db: sqlite3.Connection) -> dict[str, Any]:
     for index, row in enumerate(rows):
         expected = audit_digest(row["id"], row["action"], row["subject_id"], row["note"], row["occurred_at"], previous_hash)
         if row["previous_hash"] != previous_hash or row["entry_hash"] != expected:
-            return {"verified": False, "entriesChecked": index + 1, "entryId": row["id"],
-                    "reason": "Audit entry changed, removed, or chain link is broken."}
+            return {
+                "verified": False,
+                "entriesChecked": index + 1,
+                "entryId": row["id"],
+                "reason": "Audit entry changed, removed, or chain link is broken.",
+            }
         previous_hash = row["entry_hash"]
-    return {"verified": True, "entriesChecked": len(rows), "headHash": previous_hash,
-            "verifiedAt": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-            "limitation": "Local hash chaining is tamper-evident, not immutable against a privileged database rewrite."}
+    return {
+        "verified": True,
+        "entriesChecked": len(rows),
+        "headHash": previous_hash,
+        "verifiedAt": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "limitation": "Local hash chaining is tamper-evident, not immutable against a privileged database rewrite.",
+    }

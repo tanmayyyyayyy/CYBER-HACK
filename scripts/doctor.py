@@ -29,12 +29,12 @@ def main() -> int:
         except ImportError:
             print(f"FAIL {module} missing")
             failures.append(module)
-    for executable in ("node", "npm", "ffmpeg"):
+    for executable in ("node", "npm", "ffmpeg", "ffprobe"):
         path = shutil.which(executable)
-        print(f"{'OK' if path else ('OPTIONAL' if executable == 'ffmpeg' else 'FAIL')} {executable}: {path or 'not found'}")
-        if not path and executable != "ffmpeg":
+        print(f"{'OK' if path else ('OPTIONAL' if executable in {'ffmpeg', 'ffprobe'} else 'FAIL')} {executable}: {path or 'not found'}")
+        if not path and executable not in {"ffmpeg", "ffprobe"}:
             failures.append(executable)
-    for name in ("face_detection_yunet_2023mar.onnx", "person_detection_mediapipe_2023mar.onnx"):
+    for name in ("face_detection_yunet_2023mar.onnx", "person_detection_mediapipe_2023mar.onnx", "face_recognition_sface_2021dec.onnx"):
         path = ROOT / "models" / name
         print(f"{'OK' if path.is_file() else 'MISSING'} model {name}")
     for port in (5174, 8000):

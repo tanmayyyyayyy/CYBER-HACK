@@ -19,6 +19,11 @@ ASSETS = {
         10_000_000,
         "47fd5599d6fa17608f03e0eb0ae230baa6e597d7e8a2c8199fe00abea55a701f",
     ),
+    "face_recognition_sface_2021dec.onnx": (
+        "https://github.com/opencv/opencv_zoo/raw/refs/heads/main/models/face_recognition_sface/face_recognition_sface_2021dec.onnx",
+        30_000_000,
+        "0ba9fbfa01b5270c96627c4ef784da859931e02f04419c829e83484087c34e79",
+    ),
 }
 
 

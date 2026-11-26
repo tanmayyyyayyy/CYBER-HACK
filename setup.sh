@@ -15,4 +15,5 @@ python3 -m venv .venv
 .venv/bin/python -m pip install -r requirements.txt
 npm install
 .venv/bin/python scripts/download_models.py
+.venv/bin/python scripts/prepare_demo_feeds.py
 echo "Setup complete. Run ./start.sh"

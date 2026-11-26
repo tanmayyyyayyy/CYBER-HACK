@@ -1,20 +1,21 @@
 from __future__ import annotations
 
-import io
-import hashlib
 import contextvars
+import csv
+import hashlib
 import hmac
+import io
 import json
 import mimetypes
 import os
 import re
 import shutil
+import sqlite3
 import subprocess
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
-import sqlite3
 from urllib.parse import quote
 
 import cv2
@@ -28,15 +29,18 @@ from reportlab.lib.pagesizes import A4
 from reportlab.lib.utils import ImageReader
 from reportlab.pdfgen import canvas
 
-from backend import analysis, auth, store
-from backend.security import encrypt_snapshot
+from backend import analysis, auth, forensics, store, streams
+from backend.security import encrypt_snapshot, sign_manifest, verify_manifest
 
 APP_NAME = "Drishti Forensic Review"
-ALLOWED_EXTENSIONS = {".mp4", ".avi", ".mov", ".mkv", ".wmv", ".flv", ".mpeg", ".mpg"}
+ALLOWED_EXTENSIONS = {
+    ".mp4", ".avi", ".mov", ".mkv", ".wmv", ".flv", ".mpeg", ".mpg",
+    ".dav", ".h264", ".264", ".ts", ".m4v", ".asf", ".vob",
+}
 MAX_UPLOAD_BYTES = 500 * 1024 * 1024
 LOCAL_ORIGINS = ["http://127.0.0.1:5174", "http://localhost:5174"]
 
-app = FastAPI(title=APP_NAME, version="0.1.0", docs_url="/api/docs", redoc_url=None)
+app = FastAPI(title=APP_NAME, version="0.2.0", docs_url="/api/docs", redoc_url=None)
 analysis_pool: ThreadPoolExecutor | None = None
 app.add_middleware(
     CORSMiddleware,
@@ -76,22 +80,58 @@ def _inspect_video(path: Path) -> dict | None:
         codec = "".join(chr((fourcc >> (8 * i)) & 0xFF) for i in range(4)).strip("\x00 ") or "unknown"
         fps = float(cap.get(cv2.CAP_PROP_FPS)) or 25.0
         frame_count = float(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        return {"width": frame.shape[1], "height": frame.shape[0], "fps": fps,
-                "duration": frame_count / fps if frame_count > 0 else 0.0, "codec": codec}
+        return {
+            "width": frame.shape[1],
+            "height": frame.shape[0],
+            "fps": fps,
+            "duration": frame_count / fps if frame_count > 0 else 0.0,
+            "codec": codec,
+        }
     finally:
         cap.release()
 
 
 def _transcode_review_copy(source: Path, target: Path, ffmpeg: str) -> None:
     try:
-        subprocess.run([ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
-                        "-protocol_whitelist", "file,pipe", "-i", str(source), "-map", "0:v:0", "-an",
-                        "-sn", "-dn", "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
-                        "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(target)],
-                       capture_output=True, timeout=600, check=True)
+        subprocess.run(
+            [
+                ffmpeg,
+                "-nostdin",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-protocol_whitelist",
+                "file,pipe",
+                "-i",
+                str(source),
+                "-map",
+                "0:v:0",
+                "-an",
+                "-sn",
+                "-dn",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "veryfast",
+                "-crf",
+                "23",
+                "-pix_fmt",
+                "yuv420p",
+                "-movflags",
+                "+faststart",
+                str(target),
+            ],
+            capture_output=True,
+            timeout=600,
+            check=True,
+        )
     except (subprocess.SubprocessError, OSError) as exc:
         target.unlink(missing_ok=True)
-        raise HTTPException(422, "This export needs local H.264 conversion. Install FFmpeg with libx264, then retry.") from exc
+        raise HTTPException(
+            422,
+            "Could not normalize this export locally. If it uses encrypted/proprietary DVR playback, export it as standard MP4/AVI from your DVR software (Hikvision iVMS-4200, Dahua SmartPSS, or CP Plus KVMS) and retry.",
+        ) from exc
 
 
 def _clip_or_404(clip_id: str) -> dict:
@@ -121,14 +161,127 @@ def _public_candidate(row: dict) -> dict:
         "trackId": row["track_id"],
         "score": row["score"],
         "metrics": {
-            "sharpness": row["sharpness"], "illumination": row["illumination"],
-            "faceSize": row["face_size"], "pose": row["pose"], "confidence": round(row["confidence"] * 100),
+            "sharpness": row["sharpness"],
+            "illumination": row["illumination"],
+            "faceSize": row["face_size"],
+            "pose": row["pose"],
+            "confidence": round(row["confidence"] * 100),
         },
         "flags": flags,
+        "bbox": store.json_load(row.get("bbox_json"), []),
         "reviewStatus": row["review_status"],
         "note": row["note"],
         "imageUrl": f"/api/candidates/{row['id']}/image",
+        "enhancedUrl": f"/api/candidates/{row['id']}/enhanced",
+        "redactedFrameUrl": f"/api/candidates/{row['id']}/frame-redacted",
     }
+
+
+def _public_clip(r: dict) -> dict:
+    return {
+        "id": r["id"],
+        "filename": r["filename"],
+        "sizeBytes": r["size_bytes"],
+        "duration": r["duration"],
+        "width": r["width"],
+        "height": r["height"],
+        "fps": r["fps"],
+        "codec": r["codec"],
+        "playbackCodec": r["playback_codec"],
+        "normalized": r["sha256"] != r["analysis_sha256"],
+        "previewReady": bool(r["preview_ready"]),
+        "cameraId": r["camera_id"],
+        "sha256": r["sha256"],
+        "analysisSha256": r["analysis_sha256"],
+        "forensics": store.json_load(r.get("forensics_json"), {}),
+        "uploadedAt": r["uploaded_at"],
+        "videoUrl": f"/api/clips/{r['id']}/video",
+        "posterUrl": f"/api/clips/{r['id']}/poster",
+    }
+
+
+def _ingest_local_file(source_file: Path, original_name: str, camera_id: str, copy_source: bool = True) -> dict:
+    suffix = Path(original_name).suffix.lower() or ".mp4"
+    clip_id = uuid.uuid4().hex
+    path = store.UPLOADS / f"{clip_id}{suffix}"
+    normalized = store.UPLOADS / f"{clip_id}-normalized.mp4"
+    if copy_source:
+        shutil.copy2(source_file, path)
+    size = path.stat().st_size
+    source_digest = _file_sha256(path)
+    source_info = _inspect_video(path)
+    if source_info is None:
+        ffmpeg = shutil.which("ffmpeg")
+        if not ffmpeg:
+            raise HTTPException(422, "This file could not be decoded. Install FFmpeg and export it as MP4/H.264.")
+        _transcode_review_copy(path, normalized, ffmpeg)
+        source_info = _inspect_video(normalized)
+        if source_info is None:
+            raise HTTPException(422, "FFmpeg could not normalize this export. Check the DVR/NVR export settings.")
+        playable_path = normalized
+        preview_ready = True
+        playback_codec = source_info["codec"]
+    else:
+        playable_path = path
+        codec_name = source_info["codec"].lower()
+        suffix_name = suffix.lower()
+        browser_codec = (suffix_name == ".mp4" and codec_name in {"avc1", "h264", "x264"}) or (
+            suffix_name == ".webm" and codec_name in {"vp80", "vp90", "vp09", "av01"}
+        )
+        ffmpeg = shutil.which("ffmpeg")
+        if not browser_codec and ffmpeg:
+            _transcode_review_copy(path, normalized, ffmpeg)
+            playable_path = normalized
+            playback_info = _inspect_video(playable_path)
+            if playback_info is None:
+                raise HTTPException(422, "The converted playback copy could not be decoded.")
+            playback_codec = playback_info["codec"]
+            preview_ready = True
+        else:
+            playback_codec = source_info["codec"]
+            preview_ready = browser_codec
+
+    width, height = source_info["width"], source_info["height"]
+    fps, duration, codec = source_info["fps"], source_info["duration"], source_info["codec"]
+    analysis_digest = _file_sha256(playable_path)
+    probe_data = forensics.probe_video_container(path)
+    continuity = forensics.check_frame_continuity(playable_path)
+    forensics_payload = {"container": probe_data, "continuity": continuity}
+
+    record = {
+        "id": clip_id,
+        "filename": original_name[:180],
+        "camera_id": camera_id,
+        "path": str(playable_path),
+        "source_path": str(path),
+        "size_bytes": size,
+        "duration": round(duration, 3),
+        "width": width,
+        "height": height,
+        "fps": round(fps, 3),
+        "codec": codec,
+        "playback_codec": playback_codec,
+        "preview_ready": int(preview_ready),
+        "sha256": source_digest,
+        "analysis_sha256": analysis_digest,
+        "forensics_json": json.dumps(forensics_payload),
+        "uploaded_at": now(),
+    }
+    with store.connect() as db:
+        db.execute(
+            """INSERT INTO clips(id,filename,camera_id,path,source_path,size_bytes,duration,
+               width,height,fps,codec,playback_codec,preview_ready,sha256,analysis_sha256,forensics_json,uploaded_at)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            tuple(record.values()),
+        )
+        store.append_audit(
+            db,
+            "clip.uploaded",
+            clip_id,
+            f"Local clip uploaded: {original_name[:100]} ({size} bytes, SHA-256 {source_digest[:16]}…)",
+            now(),
+        )
+    return _public_clip(record)
 
 
 class AnalysisRequest(BaseModel):
@@ -137,6 +290,7 @@ class AnalysisRequest(BaseModel):
     time_mode: str = Field(default="clip", pattern=r"^(clip|absolute)$")
     clip_start_time: str = Field(default="", max_length=35)
     transaction_ref: str = Field(default="", max_length=40)
+    case_ref: str = Field(default="", max_length=40)
     window_seconds: int = Field(default=30, ge=5, le=300)
 
 
@@ -148,6 +302,7 @@ class ReviewRequest(BaseModel):
 class SearchRequest(BaseModel):
     candidate_id: str = Field(min_length=8, max_length=64)
     limit: int = Field(default=10, ge=1, le=30)
+    threshold: float = Field(default=0.52, ge=0.30, le=0.95)
 
 
 class SignupRequest(BaseModel):
@@ -171,6 +326,32 @@ class EvidenceCheckRequest(BaseModel):
 
 class DatabaseBackupRequest(BaseModel):
     passphrase: str = Field(min_length=16, max_length=256)
+
+
+class StreamToggleRequest(BaseModel):
+    running: bool
+
+
+class StreamSourceRequest(BaseModel):
+    source: str = Field(max_length=300)
+
+
+class ManifestVerifyRequest(BaseModel):
+    manifest: dict
+
+
+class JournalMatchRequest(BaseModel):
+    clip_id: str = Field(min_length=8, max_length=64)
+    clip_start_time: str = Field(min_length=8, max_length=40)
+    csv_text: str = Field(min_length=5, max_length=100_000)
+    window_seconds: int = Field(default=30, ge=5, le=300)
+    auto_queue: bool = False
+
+
+class WatchlistRequest(BaseModel):
+    candidate_id: str = Field(min_length=8, max_length=64)
+    label: str = Field(min_length=2, max_length=60)
+    case_ref: str = Field(default="", max_length=40)
 
 
 PUBLIC_AUTH_PATHS = {"/api/health", "/api/auth/bootstrap", "/api/auth/signup", "/api/auth/login", "/api/openapi.json", "/api/docs"}
@@ -207,10 +388,12 @@ async def add_security_headers(request: Request, call_next):
     if request.url.path.startswith("/api/"):
         response.headers["Cache-Control"] = "no-store"
     else:
-        response.headers.setdefault("Content-Security-Policy",
+        response.headers.setdefault(
+            "Content-Security-Policy",
             "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; "
             "media-src 'self' blob:; connect-src 'self'; font-src 'self'; object-src 'none'; base-uri 'self'; "
-            "form-action 'self'; frame-ancestors 'none'")
+            "form-action 'self'; frame-ancestors 'none'",
+        )
     return response
 
 
@@ -222,15 +405,23 @@ def require_admin(request: Request) -> dict:
 
 
 @app.get("/api/auth/bootstrap")
-def auth_bootstrap() -> dict:
+def auth_bootstrap(request: Request) -> dict:
     with store.connect() as db:
         count = db.execute("SELECT COUNT(*) FROM users").fetchone()[0]
-    return {"needsAdministrator": count == 0}
+    has_session = auth.session_for(request.cookies.get(auth.COOKIE_NAME)) is not None
+    return {"needsAdministrator": count == 0, "authenticated": has_session}
 
 
 def _set_session(response: JSONResponse, token: str) -> None:
-    response.set_cookie(auth.COOKIE_NAME, token, httponly=True, secure=os.environ.get("DRISHTI_COOKIE_SECURE") == "1",
-                        samesite="strict", max_age=auth.SESSION_HOURS * 3600, path="/")
+    response.set_cookie(
+        auth.COOKIE_NAME,
+        token,
+        httponly=True,
+        secure=os.environ.get("DRISHTI_COOKIE_SECURE") == "1",
+        samesite="strict",
+        max_age=auth.SESSION_HOURS * 3600,
+        path="/",
+    )
 
 
 @app.post("/api/auth/signup")
@@ -286,8 +477,18 @@ def auth_users(request: Request) -> list[dict]:
     require_admin(request)
     with store.connect() as db:
         rows = db.execute("SELECT id,email,display_name,role,status,created_at,approved_at FROM users ORDER BY created_at").fetchall()
-    return [{"id": row["id"], "email": row["email"], "displayName": row["display_name"], "role": row["role"],
-             "status": row["status"], "createdAt": row["created_at"], "approvedAt": row["approved_at"]} for row in rows]
+    return [
+        {
+            "id": row["id"],
+            "email": row["email"],
+            "displayName": row["display_name"],
+            "role": row["role"],
+            "status": row["status"],
+            "createdAt": row["created_at"],
+            "approvedAt": row["approved_at"],
+        }
+        for row in rows
+    ]
 
 
 @app.patch("/api/auth/users/{user_id}")
@@ -318,13 +519,16 @@ def _safe_mode(path: Path) -> dict:
 @app.get("/api/security/overview")
 def security_overview(request: Request) -> dict:
     require_admin(request)
-    cutoff = (datetime.now(timezone.utc).replace(microsecond=0).timestamp() - 86400)
+    cutoff = datetime.now(timezone.utc).replace(microsecond=0).timestamp() - 86400
     cutoff_iso = datetime.fromtimestamp(cutoff, timezone.utc).isoformat(timespec="seconds")
     with store.connect() as db:
         db_check = db.execute("PRAGMA quick_check").fetchone()[0]
         foreign_key_issues = len(db.execute("PRAGMA foreign_key_check").fetchall())
         audit = store.verify_audit(db)
-        failed_signins = db.execute("SELECT COUNT(*) FROM audit_log WHERE action IN ('security.login_failed','security.login_denied','security.login_throttled') AND occurred_at>=?", (cutoff_iso,)).fetchone()[0]
+        failed_signins = db.execute(
+            "SELECT COUNT(*) FROM audit_log WHERE action IN ('security.login_failed','security.login_denied','security.login_throttled') AND occurred_at>=?",
+            (cutoff_iso,),
+        ).fetchone()[0]
         pending = db.execute("SELECT COUNT(*) FROM users WHERE status='pending'").fetchone()[0]
         active = db.execute("SELECT COUNT(*) FROM users WHERE status='active'").fetchone()[0]
         clips = db.execute("SELECT COUNT(*) FROM clips").fetchone()[0]
@@ -333,18 +537,56 @@ def security_overview(request: Request) -> dict:
     data_mode = _safe_mode(store.DATA)
     db_mode = _safe_mode(store.DB_PATH)
     return {
-        "database": {"integrity": db_check, "foreignKeyViolations": foreign_key_issues,
-                     "sizeBytes": store.DB_PATH.stat().st_size if store.DB_PATH.exists() else 0,
-                     "directoryPermissions": data_mode, "filePermissions": db_mode},
+        "database": {
+            "integrity": db_check,
+            "foreignKeyViolations": foreign_key_issues,
+            "sizeBytes": store.DB_PATH.stat().st_size if store.DB_PATH.exists() else 0,
+            "directoryPermissions": data_mode,
+            "filePermissions": db_mode,
+        },
         "audit": audit,
         "accounts": {"active": active, "pending": pending, "failedSignins24h": failed_signins},
-        "evidence": {"clipCount": clips,
-                     "lastFullCheck": ({"checkedAt": full_check["checked_at"], "clipsChecked": full_check["clips_checked"], "mismatchCount": full_check["mismatch_count"]} if full_check else None)},
-        "backup": ({"id": backup["id"], "createdAt": backup["created_at"], "sizeBytes": backup["size_bytes"], "sha256": backup["sha256"]}
-                   if backup else None),
-        "hostEncryption": {"status": "verify", "message": "Enable FileVault, BitLocker, or LUKS on the host volume; this app does not manage the device key."},
-        "networkBoundary": {"status": "loopback", "message": "The local runner binds to 127.0.0.1; keep reverse proxies and remote access disabled unless formally reviewed."},
+        "evidence": {
+            "clipCount": clips,
+            "lastFullCheck": (
+                {
+                    "checkedAt": full_check["checked_at"],
+                    "clipsChecked": full_check["clips_checked"],
+                    "mismatchCount": full_check["mismatch_count"],
+                }
+                if full_check
+                else None
+            ),
+        },
+        "backup": (
+            {"id": backup["id"], "createdAt": backup["created_at"], "sizeBytes": backup["size_bytes"], "sha256": backup["sha256"]}
+            if backup
+            else None
+        ),
+        "signingKey": {"present": store.SIGNING_KEY_PATH.is_file(), "permissions": _safe_mode(store.SIGNING_KEY_PATH)},
+        "hostEncryption": {
+            "status": "verify",
+            "message": "Enable FileVault, BitLocker, or LUKS on the host volume; this app does not manage the device key.",
+        },
+        "networkBoundary": {
+            "status": "loopback",
+            "message": "The local runner binds to 127.0.0.1; keep reverse proxies and remote access disabled unless formally reviewed.",
+        },
     }
+
+
+@app.post("/api/security/verify-manifest")
+def security_verify_manifest(payload: ManifestVerifyRequest, request: Request) -> dict:
+    result = verify_manifest(payload.manifest)
+    with store.connect() as db:
+        store.append_audit(
+            db,
+            "security.manifest_verified",
+            str(payload.manifest.get("analysisId", ""))[:40],
+            f"Manifest seal verified={result['verified']}",
+            now(),
+        )
+    return result
 
 
 @app.post("/api/security/evidence-check")
@@ -364,21 +606,48 @@ def security_evidence_check(payload: EvidenceCheckRequest, request: Request) -> 
         analysis_matches = _matches_sha256(analysis_path, clip["analysis_sha256"])
         checked += 1
         if not source_matches or not analysis_matches:
-            mismatches.append({"clipId": clip["id"], "filename": clip["filename"],
-                               "sourceMatches": bool(source_matches), "analysisMatches": bool(analysis_matches)})
+            mismatches.append(
+                {
+                    "clipId": clip["id"],
+                    "filename": clip["filename"],
+                    "sourceMatches": bool(source_matches),
+                    "analysisMatches": bool(analysis_matches),
+                }
+            )
     stamp = now()
     with store.connect() as db:
-        store.append_audit(db, "security.evidence_batch_check", "all" if not payload.clip_ids else ",".join(payload.clip_ids)[:500],
-                           f"Checked {checked} clips; {len(mismatches)} integrity mismatch(es)", stamp)
-        db.execute("INSERT INTO security_evidence_checks(id,checked_by,checked_at,clips_checked,mismatch_count,details_json) VALUES(?,?,?,?,?,?)",
-                   (uuid.uuid4().hex, request.state.session["user"]["id"], stamp, checked, len(mismatches), json.dumps(mismatches)))
+        store.append_audit(
+            db,
+            "security.evidence_batch_check",
+            "all" if not payload.clip_ids else ",".join(payload.clip_ids)[:500],
+            f"Checked {checked} clips; {len(mismatches)} integrity mismatch(es)",
+            stamp,
+        )
+        db.execute(
+            "INSERT INTO security_evidence_checks(id,checked_by,checked_at,clips_checked,mismatch_count,details_json) VALUES(?,?,?,?,?,?)",
+            (uuid.uuid4().hex, request.state.session["user"]["id"], stamp, checked, len(mismatches), json.dumps(mismatches)),
+        )
         for mismatch in mismatches:
-            db.execute("INSERT INTO events VALUES(?,?,?,?,?,?,?,?)",
-                       (uuid.uuid4().hex, None, mismatch["clipId"], "evidence.integrity_mismatch",
-                        f"Full security check found changed or missing bytes for {mismatch['filename']}", "critical", stamp,
-                        json.dumps({"sourceMatches": mismatch["sourceMatches"], "analysisMatches": mismatch["analysisMatches"]})))
-    return {"checked": checked, "verified": checked - len(mismatches), "mismatches": mismatches, "checkedAt": stamp,
-            "notice": "SHA-256 matches compare local bytes to ingest fingerprints; they do not attest the original recording source."}
+            db.execute(
+                "INSERT INTO events VALUES(?,?,?,?,?,?,?,?)",
+                (
+                    uuid.uuid4().hex,
+                    None,
+                    mismatch["clipId"],
+                    "evidence.integrity_mismatch",
+                    f"Full security check found changed or missing bytes for {mismatch['filename']}",
+                    "critical",
+                    stamp,
+                    json.dumps({"sourceMatches": mismatch["sourceMatches"], "analysisMatches": mismatch["analysisMatches"]}),
+                ),
+            )
+    return {
+        "checked": checked,
+        "verified": checked - len(mismatches),
+        "mismatches": mismatches,
+        "checkedAt": stamp,
+        "notice": "SHA-256 matches compare local bytes to ingest fingerprints; they do not attest the original recording source.",
+    }
 
 
 @app.get("/api/security/database-backups")
@@ -386,7 +655,10 @@ def list_database_backups(request: Request) -> list[dict]:
     require_admin(request)
     with store.connect() as db:
         rows = db.execute("SELECT id,created_at,size_bytes,sha256 FROM security_backups ORDER BY created_at DESC LIMIT 20").fetchall()
-    return [{"id": row["id"], "createdAt": row["created_at"], "sizeBytes": row["size_bytes"], "sha256": row["sha256"]} for row in rows]
+    return [
+        {"id": row["id"], "createdAt": row["created_at"], "sizeBytes": row["size_bytes"], "sha256": row["sha256"]}
+        for row in rows
+    ]
 
 
 @app.post("/api/security/database-backups", status_code=201)
@@ -414,13 +686,25 @@ def create_database_backup(payload: DatabaseBackupRequest, request: Request) -> 
         size, digest = path.stat().st_size, _file_sha256(path)
         created = now()
         with store.connect() as db:
-            db.execute("INSERT INTO security_backups(id,filename,created_by,created_at,size_bytes,sha256) VALUES(?,?,?,?,?,?)",
-                       (backup_id, filename, admin["id"], created, size, digest))
-            store.append_audit(db, "security.database_backup_created", backup_id,
-                               f"Encrypted SQLite quick_check=ok; AES-256-GCM; {size} bytes; SHA-256 {digest}", created)
-        return {"id": backup_id, "createdAt": created, "sizeBytes": size, "sha256": digest,
-                "downloadUrl": f"/api/security/database-backups/{backup_id}",
-                "scope": "Passphrase-encrypted SQLite metadata snapshot only; video files and candidate images are not included."}
+            db.execute(
+                "INSERT INTO security_backups(id,filename,created_by,created_at,size_bytes,sha256) VALUES(?,?,?,?,?,?)",
+                (backup_id, filename, admin["id"], created, size, digest),
+            )
+            store.append_audit(
+                db,
+                "security.database_backup_created",
+                backup_id,
+                f"Encrypted SQLite quick_check=ok; AES-256-GCM; {size} bytes; SHA-256 {digest}",
+                created,
+            )
+        return {
+            "id": backup_id,
+            "createdAt": created,
+            "sizeBytes": size,
+            "sha256": digest,
+            "downloadUrl": f"/api/security/database-backups/{backup_id}",
+            "scope": "Passphrase-encrypted SQLite metadata snapshot only; video files and candidate images are not included.",
+        }
     except Exception as exc:
         path.unlink(missing_ok=True)
         with store.connect() as db:
@@ -439,9 +723,15 @@ def download_database_backup(backup_id: str, request: Request) -> FileResponse:
         if not _matches_sha256(path, row["sha256"]):
             store.append_audit(db, "security.database_backup_mismatch", backup_id, "Snapshot missing or hash mismatch", now())
             raise HTTPException(409, "Snapshot integrity check failed; do not use this backup.")
-        store.append_audit(db, "security.database_backup_downloaded", backup_id, "Administrator downloaded metadata snapshot", now(), actor_id=admin["id"])
-    return FileResponse(path, media_type="application/octet-stream", filename=row["filename"],
-                        headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"})
+        store.append_audit(
+            db, "security.database_backup_downloaded", backup_id, "Administrator downloaded metadata snapshot", now(), actor_id=admin["id"]
+        )
+    return FileResponse(
+        path,
+        media_type="application/octet-stream",
+        filename=row["filename"],
+        headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"},
+    )
 
 
 @app.on_event("startup")
@@ -452,14 +742,17 @@ def startup() -> None:
     with store.connect() as db:
         interrupted = db.execute("SELECT id FROM analyses WHERE status IN ('queued','running')").fetchall()
         for row in interrupted:
-            db.execute("UPDATE analyses SET status='failed',error=?,updated_at=? WHERE id=?",
-                       ("Processing stopped because the local service restarted. Start this analysis again.", now(), row["id"]))
+            db.execute(
+                "UPDATE analyses SET status='failed',error=?,updated_at=? WHERE id=?",
+                ("Processing stopped because the local service restarted. Start this analysis again.", now(), row["id"]),
+            )
             store.append_audit(db, "analysis.interrupted", row["id"], "Service restarted during analysis", now())
 
 
 @app.on_event("shutdown")
 def shutdown() -> None:
     global analysis_pool
+    streams.manager.stop()
     if analysis_pool is not None:
         analysis_pool.shutdown(wait=True, cancel_futures=True)
         analysis_pool = None
@@ -471,9 +764,15 @@ def health() -> dict:
         "status": "local",
         "service": APP_NAME,
         "models": analysis.model_status(),
-        "ffmpeg": bool(__import__("shutil").which("ffmpeg")),
+        "ffmpeg": bool(shutil.which("ffmpeg")),
+        "ffprobe": bool(shutil.which("ffprobe")),
         "cloud": "disabled",
     }
+
+
+@app.get("/api/dvr-guidance")
+def dvr_guidance() -> dict:
+    return {"supportedExtensions": sorted(ALLOWED_EXTENSIONS), "guidance": forensics.DVR_EXPORT_GUIDANCE}
 
 
 @app.get("/api/overview")
@@ -497,16 +796,7 @@ def overview() -> dict:
 def list_clips() -> list[dict]:
     with store.connect() as db:
         rows = db.execute("SELECT * FROM clips ORDER BY uploaded_at DESC").fetchall()
-    return [
-        {"id": r["id"], "filename": r["filename"], "sizeBytes": r["size_bytes"],
-         "duration": r["duration"], "width": r["width"], "height": r["height"],
-         "fps": r["fps"], "codec": r["codec"], "playbackCodec": r["playback_codec"],
-         "normalized": r["sha256"] != r["analysis_sha256"], "previewReady": bool(r["preview_ready"]),
-         "cameraId": r["camera_id"],
-         "sha256": r["sha256"], "uploadedAt": r["uploaded_at"],
-         "videoUrl": f"/api/clips/{r['id']}/video", "posterUrl": f"/api/clips/{r['id']}/poster"}
-        for r in rows
-    ]
+    return [_public_clip(dict(r)) for r in rows]
 
 
 @app.get("/api/cameras")
@@ -514,27 +804,33 @@ def camera_slots() -> list[dict]:
     labels = {"ATM-01": "Entry view", "ATM-02": "Keypad view", "ATM-03": "Cash slot", "ATM-04": "Exit view"}
     clips = list_clips()
     return [
-        {"id": camera_id, "label": label,
-         "clips": [clip for clip in clips if clip["cameraId"] == camera_id],
-         "status": "recorded" if any(clip["cameraId"] == camera_id for clip in clips) else "awaiting clip",
-         "source": "local file"}
+        {
+            "id": camera_id,
+            "label": label,
+            "clips": [clip for clip in clips if clip["cameraId"] == camera_id],
+            "status": "recorded" if any(clip["cameraId"] == camera_id for clip in clips) else "awaiting clip",
+            "source": "local file",
+        }
         for camera_id, label in labels.items()
     ]
 
 
 @app.post("/api/clips", status_code=201)
-async def upload_clip(request: Request, filename: str, camera_id: str = "ATM-01") -> dict:
+async def upload_clip(request: Request, filename: str, camera_id: str = "ATM-01", replace_clip_id: str = "") -> dict:
     original = Path(filename).name.strip()
     suffix = Path(original).suffix.lower()
     if camera_id not in {"ATM-01", "ATM-02", "ATM-03", "ATM-04"}:
         raise HTTPException(422, "Choose one of the four local ATM camera channels.")
     if suffix not in ALLOWED_EXTENSIONS:
-        raise HTTPException(415, "Use MP4, AVI, MOV, MKV, WMV, FLV, MPEG, or MPG.")
+        raise HTTPException(415, "Use MP4, AVI, MOV, MKV, WMV, FLV, MPEG, MPG, or compatible DAV/H264/TS DVR exports.")
+    if replace_clip_id:
+        try:
+            delete_clip(replace_clip_id)
+        except HTTPException:
+            pass
     clip_id = uuid.uuid4().hex
     path = store.UPLOADS / f"{clip_id}{suffix}"
-    normalized = store.UPLOADS / f"{clip_id}-normalized.mp4"
     size = 0
-    source_digest = hashlib.sha256()
     try:
         with path.open("wb") as output:
             async for chunk in request.stream():
@@ -542,10 +838,12 @@ async def upload_clip(request: Request, filename: str, camera_id: str = "ATM-01"
                 if size > MAX_UPLOAD_BYTES:
                     raise HTTPException(413, "Maximum clip size is 500 MB.")
                 output.write(chunk)
-                source_digest.update(chunk)
         if size == 0:
             raise HTTPException(400, "The uploaded clip is empty.")
+        # Reuse ingest pipeline without extra copy
+        source_digest = _file_sha256(path)
         source_info = _inspect_video(path)
+        normalized = store.UPLOADS / f"{clip_id}-normalized.mp4"
         if source_info is None:
             ffmpeg = shutil.which("ffmpeg")
             if not ffmpeg:
@@ -561,8 +859,9 @@ async def upload_clip(request: Request, filename: str, camera_id: str = "ATM-01"
             playable_path = path
             codec_name = source_info["codec"].lower()
             suffix_name = suffix.lower()
-            browser_codec = ((suffix_name == ".mp4" and codec_name in {"avc1", "h264", "x264"})
-                             or (suffix_name == ".webm" and codec_name in {"vp80", "vp90", "vp09", "av01"}))
+            browser_codec = (suffix_name == ".mp4" and codec_name in {"avc1", "h264", "x264"}) or (
+                suffix_name == ".webm" and codec_name in {"vp80", "vp90", "vp09", "av01"}
+            )
             ffmpeg = shutil.which("ffmpeg")
             if not browser_codec and ffmpeg:
                 _transcode_review_copy(path, normalized, ffmpeg)
@@ -575,35 +874,52 @@ async def upload_clip(request: Request, filename: str, camera_id: str = "ATM-01"
             else:
                 playback_codec = source_info["codec"]
                 preview_ready = browser_codec
+
         width, height = source_info["width"], source_info["height"]
         fps, duration, codec = source_info["fps"], source_info["duration"], source_info["codec"]
         analysis_digest = _file_sha256(playable_path)
+        forensics_payload = {
+            "container": forensics.probe_video_container(path),
+            "continuity": forensics.check_frame_continuity(playable_path),
+        }
         record = {
-            "id": clip_id, "filename": original[:180], "camera_id": camera_id,
-            "path": str(playable_path), "source_path": str(path), "size_bytes": size,
-            "duration": round(duration, 3), "width": width, "height": height,
-            "fps": round(fps, 3), "codec": codec, "playback_codec": playback_codec,
-            "preview_ready": int(preview_ready), "sha256": source_digest.hexdigest(),
-            "analysis_sha256": analysis_digest, "uploaded_at": now(),
+            "id": clip_id,
+            "filename": original[:180],
+            "camera_id": camera_id,
+            "path": str(playable_path),
+            "source_path": str(path),
+            "size_bytes": size,
+            "duration": round(duration, 3),
+            "width": width,
+            "height": height,
+            "fps": round(fps, 3),
+            "codec": codec,
+            "playback_codec": playback_codec,
+            "preview_ready": int(preview_ready),
+            "sha256": source_digest,
+            "analysis_sha256": analysis_digest,
+            "forensics_json": json.dumps(forensics_payload),
+            "uploaded_at": now(),
         }
         with store.connect() as db:
-            db.execute("""INSERT INTO clips(id,filename,camera_id,path,source_path,size_bytes,duration,
-                         width,height,fps,codec,playback_codec,preview_ready,sha256,analysis_sha256,uploaded_at)
-                         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", tuple(record.values()))
-            store.append_audit(db, "clip.uploaded", clip_id,
-                               f"Local clip uploaded: {original[:100]} ({size} bytes, SHA-256 {record['sha256'][:16]}…)", now())
-        return {"id": clip_id, "filename": record["filename"], "cameraId": camera_id,
-                "sizeBytes": size, "duration": record["duration"], "width": width, "height": height,
-                "fps": record["fps"], "codec": codec, "playbackCodec": playback_codec,
-                "normalized": analysis_digest != record["sha256"], "previewReady": preview_ready,
-                "uploadedAt": record["uploaded_at"],
-                "sha256": record["sha256"],
-                "videoUrl": f"/api/clips/{clip_id}/video", "posterUrl": f"/api/clips/{clip_id}/poster"}
+            db.execute(
+                """INSERT INTO clips(id,filename,camera_id,path,source_path,size_bytes,duration,
+                   width,height,fps,codec,playback_codec,preview_ready,sha256,analysis_sha256,forensics_json,uploaded_at)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                tuple(record.values()),
+            )
+            store.append_audit(
+                db,
+                "clip.uploaded",
+                clip_id,
+                f"Local clip uploaded: {original[:100]} ({size} bytes, SHA-256 {source_digest[:16]}…)",
+                now(),
+            )
+        return _public_clip(record)
     except Exception:
         path.unlink(missing_ok=True)
-        if 'playable_path' in locals() and playable_path != path:
-            playable_path.unlink(missing_ok=True)
-        normalized.unlink(missing_ok=True)
+        normalized_path = store.UPLOADS / f"{clip_id}-normalized.mp4"
+        normalized_path.unlink(missing_ok=True)
         raise
 
 
@@ -611,8 +927,13 @@ async def upload_clip(request: Request, filename: str, camera_id: str = "ATM-01"
 def clip_video(clip_id: str) -> FileResponse:
     clip = _clip_or_404(clip_id)
     media_type = mimetypes.guess_type(clip["path"])[0] or "video/mp4"
-    return FileResponse(clip["path"], media_type=media_type, filename=clip["filename"],
-                        content_disposition_type="inline", headers={"X-Content-Type-Options": "nosniff", "Cache-Control": "private, no-store"})
+    return FileResponse(
+        clip["path"],
+        media_type=media_type,
+        filename=clip["filename"],
+        content_disposition_type="inline",
+        headers={"X-Content-Type-Options": "nosniff", "Cache-Control": "private, no-store"},
+    )
 
 
 @app.get("/api/clips/{clip_id}/poster")
@@ -656,24 +977,42 @@ def clip_integrity(clip_id: str) -> dict:
     analyzed_ok = _matches_sha256(analyzed_path, clip["analysis_sha256"])
     verified = source_ok and analyzed_ok
     with store.connect() as db:
-        store.append_audit(db, "clip.integrity_checked", clip_id,
-                           "SHA-256 verified against ingest fingerprints" if verified else "SHA-256 mismatch or missing local evidence file",
-                           now())
+        store.append_audit(
+            db,
+            "clip.integrity_checked",
+            clip_id,
+            "SHA-256 verified against ingest fingerprints" if verified else "SHA-256 mismatch or missing local evidence file",
+            now(),
+        )
         if not verified:
-            db.execute("INSERT INTO events VALUES(?,?,?,?,?,?,?,?)",
-                       (uuid.uuid4().hex, None, clip_id, "evidence.integrity_mismatch",
-                        f"SHA-256 verification failed for {clip['filename']}", "warning", now(),
-                        json.dumps({"sourceMatches": source_ok, "analysisMatches": analyzed_ok})))
-    return {"clipId": clip_id, "filename": clip["filename"], "verified": verified,
-            "sourceMatches": source_ok, "analysisMatches": analyzed_ok,
-            "sourceSha256": clip["sha256"], "analysisSha256": clip["analysis_sha256"],
-            "normalized": clip["sha256"] != clip["analysis_sha256"], "checkedAt": now(),
-            "notice": "Hash match shows these local bytes match their ingest fingerprints; it does not prove who recorded the source footage."}
+            db.execute(
+                "INSERT INTO events VALUES(?,?,?,?,?,?,?,?)",
+                (
+                    uuid.uuid4().hex,
+                    None,
+                    clip_id,
+                    "evidence.integrity_mismatch",
+                    f"SHA-256 verification failed for {clip['filename']}",
+                    "warning",
+                    now(),
+                    json.dumps({"sourceMatches": source_ok, "analysisMatches": analyzed_ok}),
+                ),
+            )
+    return {
+        "clipId": clip_id,
+        "filename": clip["filename"],
+        "verified": verified,
+        "sourceMatches": source_ok,
+        "analysisMatches": analyzed_ok,
+        "sourceSha256": clip["sha256"],
+        "analysisSha256": clip["analysis_sha256"],
+        "normalized": clip["sha256"] != clip["analysis_sha256"],
+        "checkedAt": now(),
+        "notice": "Hash match shows these local bytes match their ingest fingerprints; it does not prove who recorded the source footage.",
+    }
 
 
-@app.post("/api/analyses", status_code=202)
-def create_analysis(payload: AnalysisRequest) -> dict:
-    clip = _clip_or_404(payload.clip_id)
+def _queue_analysis_job(clip: dict, payload: AnalysisRequest) -> dict:
     if payload.time_mode == "clip":
         try:
             seconds = analysis._time_seconds(payload.transaction_time)
@@ -689,12 +1028,33 @@ def create_analysis(payload: AnalysisRequest) -> dict:
     job_id = uuid.uuid4().hex
     stamp = now()
     with store.connect() as db:
-        db.execute("INSERT INTO analyses VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
-                   (job_id, clip["id"], payload.transaction_time, payload.time_mode,
-                    payload.clip_start_time, payload.transaction_ref.strip(),
-                    payload.window_seconds, "running", "{}", "", stamp, stamp))
-        store.append_audit(db, "analysis.started", job_id,
-                           f"Window ±{payload.window_seconds}s at {payload.transaction_time}", stamp)
+        db.execute(
+            """INSERT INTO analyses(id,clip_id,transaction_time,time_mode,clip_start_time,transaction_ref,
+               case_ref,window_seconds,status,result_json,error,created_at,updated_at)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                job_id,
+                clip["id"],
+                payload.transaction_time,
+                payload.time_mode,
+                payload.clip_start_time,
+                payload.transaction_ref.strip(),
+                payload.case_ref.strip(),
+                payload.window_seconds,
+                "running",
+                "{}",
+                "",
+                stamp,
+                stamp,
+            ),
+        )
+        store.append_audit(
+            db,
+            "analysis.started",
+            job_id,
+            f"Window ±{payload.window_seconds}s at {payload.transaction_time} (case={payload.case_ref.strip() or 'unassigned'})",
+            stamp,
+        )
     if analysis_pool is None:
         raise HTTPException(503, "Local analysis worker is not ready. Restart the service and retry.")
     analysis_context = contextvars.copy_context()
@@ -702,11 +1062,19 @@ def create_analysis(payload: AnalysisRequest) -> dict:
     return {"id": job_id, "status": "running", "clipId": clip["id"], "transactionTime": payload.transaction_time}
 
 
+@app.post("/api/analyses", status_code=202)
+def create_analysis(payload: AnalysisRequest) -> dict:
+    clip = _clip_or_404(payload.clip_id)
+    return _queue_analysis_job(clip, payload)
+
+
 @app.get("/api/analyses")
 def list_analyses() -> list[dict]:
     with store.connect() as db:
-        rows = db.execute("""SELECT a.*, c.filename FROM analyses a JOIN clips c ON c.id=a.clip_id
-                             ORDER BY a.created_at DESC LIMIT 100""").fetchall()
+        rows = db.execute(
+            """SELECT a.*, c.filename FROM analyses a JOIN clips c ON c.id=a.clip_id
+               ORDER BY a.created_at DESC LIMIT 100"""
+        ).fetchall()
         analysis_ids = [r["id"] for r in rows]
         candidates_by_analysis: dict[str, list[dict]] = {key: [] for key in analysis_ids}
         if analysis_ids:
@@ -714,13 +1082,26 @@ def list_analyses() -> list[dict]:
             candidates = db.execute(f"SELECT * FROM candidates WHERE analysis_id IN ({marks}) ORDER BY score DESC", analysis_ids).fetchall()
             for candidate in candidates:
                 candidates_by_analysis[candidate["analysis_id"]].append(_public_candidate(dict(candidate)))
-    return [{"id": r["id"], "clipId": r["clip_id"], "clipName": r["filename"], "filename": r["filename"],
-             "transactionTime": r["transaction_time"], "transactionRef": r["transaction_ref"],
-             "timeMode": r["time_mode"], "clipStartTime": r["clip_start_time"],
-             "windowSeconds": r["window_seconds"], "status": r["status"], "error": r["error"],
-             "createdAt": r["created_at"], "result": store.json_load(r["result_json"], {}),
-             "candidates": candidates_by_analysis[r["id"]]}
-            for r in rows]
+    return [
+        {
+            "id": r["id"],
+            "clipId": r["clip_id"],
+            "clipName": r["filename"],
+            "filename": r["filename"],
+            "transactionTime": r["transaction_time"],
+            "transactionRef": r["transaction_ref"],
+            "caseRef": r["case_ref"] if "case_ref" in r.keys() else "",
+            "timeMode": r["time_mode"],
+            "clipStartTime": r["clip_start_time"],
+            "windowSeconds": r["window_seconds"],
+            "status": r["status"],
+            "error": r["error"],
+            "createdAt": r["created_at"],
+            "result": store.json_load(r["result_json"], {}),
+            "candidates": candidates_by_analysis[r["id"]],
+        }
+        for r in rows
+    ]
 
 
 @app.get("/api/analyses/{analysis_id}")
@@ -731,29 +1112,101 @@ def get_analysis(analysis_id: str) -> dict:
             raise HTTPException(404, "Analysis not found")
         clip = store.row_dict(db.execute("SELECT * FROM clips WHERE id=?", (row["clip_id"],)).fetchone())
         candidates = db.execute("SELECT * FROM candidates WHERE analysis_id=? ORDER BY score DESC", (analysis_id,)).fetchall()
-    return {"id": row["id"], "clipId": row["clip_id"], "clipName": clip["filename"],
-            "transactionTime": row["transaction_time"], "transactionRef": row["transaction_ref"],
-            "timeMode": row["time_mode"], "clipStartTime": row["clip_start_time"],
-            "windowSeconds": row["window_seconds"], "status": row["status"], "error": row["error"],
-            "createdAt": row["created_at"], "result": store.json_load(row["result_json"], {}),
-            "candidates": [_public_candidate(dict(c)) for c in candidates]}
+    return {
+        "id": row["id"],
+        "clipId": row["clip_id"],
+        "clipName": clip["filename"],
+        "transactionTime": row["transaction_time"],
+        "transactionRef": row["transaction_ref"],
+        "caseRef": row.get("case_ref", ""),
+        "timeMode": row["time_mode"],
+        "clipStartTime": row["clip_start_time"],
+        "windowSeconds": row["window_seconds"],
+        "status": row["status"],
+        "error": row["error"],
+        "createdAt": row["created_at"],
+        "result": store.json_load(row["result_json"], {}),
+        "candidates": [_public_candidate(dict(c)) for c in candidates],
+    }
 
 
 @app.get("/api/candidates/{candidate_id}/image")
 def candidate_image(candidate_id: str) -> FileResponse:
     candidate = _candidate_or_404(candidate_id)
-    return FileResponse(candidate["image_path"], media_type="image/jpeg",
-                        headers={"X-Content-Type-Options": "nosniff", "Cache-Control": "private, no-store"})
+    return FileResponse(
+        candidate["image_path"],
+        media_type="image/jpeg",
+        headers={"X-Content-Type-Options": "nosniff", "Cache-Control": "private, no-store"},
+    )
+
+
+@app.get("/api/candidates/{candidate_id}/enhanced")
+def candidate_enhanced(candidate_id: str, label: int = 1) -> StreamingResponse:
+    candidate = _candidate_or_404(candidate_id)
+    face_bgr = cv2.imread(candidate["image_path"])
+    if face_bgr is None:
+        raise HTTPException(404, "Candidate face file missing.")
+    enhanced = forensics.enhance_face_crop(face_bgr, label=bool(label))
+    ok, jpg = cv2.imencode(".jpg", enhanced, [cv2.IMWRITE_JPEG_QUALITY, 94])
+    if not ok:
+        raise HTTPException(500, "Could not encode enhanced image.")
+    return StreamingResponse(
+        io.BytesIO(jpg.tobytes()),
+        media_type="image/jpeg",
+        headers={
+            "Cache-Control": "private, no-store",
+            "X-Content-Type-Options": "nosniff",
+            "X-Forensic-Enhancement": "CLAHE-Bilateral-Unsharp-2x-ReviewOnly",
+        },
+    )
+
+
+@app.get("/api/candidates/{candidate_id}/frame-redacted")
+def candidate_frame_redacted(candidate_id: str) -> StreamingResponse:
+    candidate = _candidate_or_404(candidate_id)
+    clip = _clip_or_404(candidate["clip_id"])
+    detector = None
+    try:
+        detector = analysis.new_face_detector()
+    except RuntimeError:
+        pass
+    bbox = store.json_load(candidate.get("bbox_json"), [])
+    try:
+        jpeg_bytes = forensics.redact_bystanders_frame(
+            Path(clip["path"]),
+            float(candidate["frame_seconds"]),
+            bbox if isinstance(bbox, list) else None,
+            detector,
+            clip["sha256"],
+        )
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    with store.connect() as db:
+        store.append_audit(
+            db,
+            "candidate.privacy_frame_exported",
+            candidate_id,
+            f"Exported bystander-redacted frame at t={candidate['frame_seconds']}s",
+            now(),
+        )
+    return StreamingResponse(
+        io.BytesIO(jpeg_bytes),
+        media_type="image/jpeg",
+        headers={
+            "Cache-Control": "private, no-store",
+            "Content-Disposition": f'inline; filename="redacted-{candidate_id[:12]}.jpg"',
+        },
+    )
 
 
 @app.patch("/api/candidates/{candidate_id}/review")
 def review_candidate(candidate_id: str, payload: ReviewRequest) -> dict:
     candidate = _candidate_or_404(candidate_id)
     with store.connect() as db:
-        db.execute("UPDATE candidates SET review_status=?, note=? WHERE id=?",
-                   (payload.status, payload.note.strip(), candidate_id))
-        store.append_audit(db, f"candidate.{payload.status}", candidate_id,
-                           payload.note.strip() or f"Review marked {payload.status}", now())
+        db.execute("UPDATE candidates SET review_status=?, note=? WHERE id=?", (payload.status, payload.note.strip(), candidate_id))
+        store.append_audit(
+            db, f"candidate.{payload.status}", candidate_id, payload.note.strip() or f"Review marked {payload.status}", now()
+        )
     return {"id": candidate_id, "status": payload.status, "analysisId": candidate["analysis_id"]}
 
 
@@ -766,49 +1219,554 @@ def search_candidate(payload: SearchRequest) -> dict:
     with store.connect() as db:
         rows = db.execute(
             """SELECT c.*, clips.filename FROM candidates c JOIN clips ON clips.id=c.clip_id
-               WHERE c.clip_id != ? ORDER BY c.score DESC LIMIT 1000""", (query["clip_id"],)
+               WHERE c.clip_id != ? ORDER BY c.score DESC LIMIT 1000""",
+            (query["clip_id"],),
         ).fetchall()
     matches = []
-    target_array = __import__("numpy").asarray(target, dtype=float)
     for row in rows:
         candidate = dict(row)
         vector = store.json_load(candidate["descriptor_json"], [])
-        if len(vector) != len(target):
-            continue
-        score = float(__import__("numpy").dot(target_array, vector))
-        if score >= 0.55:
-            matches.append({**_public_candidate(candidate), "similarity": round(score * 100, 1),
-                            "filename": candidate["filename"]})
+        score = analysis.descriptor_similarity(target, vector)
+        if score is not None and score >= payload.threshold:
+            matches.append({**_public_candidate(candidate), "similarity": round(score * 100, 1), "filename": candidate["filename"]})
     matches.sort(key=lambda item: item["similarity"], reverse=True)
+    method = "SFace 128-D face embedding cosine similarity" if len(target) == 128 else "Local grayscale histogram similarity"
     with store.connect() as db:
-        store.append_audit(db, "candidate.search", query["id"],
-                           f"Clip-only visual similarity search across {len({m['clipId'] for m in matches})} clips", now())
-    return {"queryCandidateId": query["id"], "matches": matches[:payload.limit],
-            "notice": "Appearance similarity only; not identity verification. Results require human review."}
+        store.append_audit(
+            db,
+            "candidate.search",
+            query["id"],
+            f"{method} across {len({m['clipId'] for m in matches})} clips ({len(matches)} hits >= {int(payload.threshold * 100)}%)",
+            now(),
+        )
+    return {
+        "queryCandidateId": query["id"],
+        "embeddingType": "sface_128d" if len(target) == 128 else "hist_32",
+        "matches": matches[: payload.limit],
+        "notice": f"{method}. Results are review candidates only — not identity verification or guilt confirmation.",
+    }
+
+
+@app.post("/api/journal/match")
+def match_transaction_journal(payload: JournalMatchRequest) -> dict:
+    clip = _clip_or_404(payload.clip_id)
+    try:
+        clip_start = datetime.fromisoformat(payload.clip_start_time.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise HTTPException(422, "Invalid clip_start_time ISO format.") from exc
+
+    reader = csv.DictReader(io.StringIO(payload.csv_text.strip()))
+    matched_rows = []
+    queued_ids = []
+    for idx, row in enumerate(reader, start=1):
+        norm = {str(k).strip().lower(): str(v or "").strip() for k, v in row.items() if k is not None}
+        ts_raw = norm.get("timestamp") or norm.get("time") or norm.get("txn_time") or ""
+        txn_ref = norm.get("txn_ref") or norm.get("reference") or norm.get("rrn") or f"ROW-{idx}"
+        status = norm.get("status") or norm.get("type") or "WITHDRAWAL"
+        atm_id = norm.get("atm_id") or clip["camera_id"]
+        if not ts_raw:
+            continue
+        try:
+            txn_dt = datetime.fromisoformat(ts_raw.replace("Z", "+00:00"))
+            cmp_start = clip_start
+            # Compare in wall-clock local time if either timestamp omits timezone offset
+            if txn_dt.tzinfo is None and cmp_start.tzinfo is not None:
+                cmp_start = cmp_start.replace(tzinfo=None)
+            elif txn_dt.tzinfo is not None and cmp_start.tzinfo is None:
+                txn_dt = txn_dt.replace(tzinfo=None)
+            offset = int((txn_dt - cmp_start).total_seconds())
+        except ValueError:
+            offset = -1
+        in_clip = 0 <= offset < float(clip["duration"])
+        disputed = any(word in status.lower() for word in ("dispute", "fraud", "skim", "suspect", "alert", "fail"))
+        item = {
+            "row": idx,
+            "timestamp": ts_raw,
+            "txnRef": txn_ref,
+            "atmId": atm_id,
+            "status": status,
+            "offsetSeconds": offset,
+            "inClip": in_clip,
+            "disputed": disputed,
+        }
+        if in_clip and payload.auto_queue and (disputed or len(queued_ids) == 0):
+            job = _queue_analysis_job(
+                clip,
+                AnalysisRequest(
+                    clip_id=clip["id"],
+                    transaction_time=ts_raw,
+                    time_mode="absolute",
+                    clip_start_time=payload.clip_start_time,
+                    transaction_ref=txn_ref,
+                    case_ref=f"EJ-{txn_ref[:16]}",
+                    window_seconds=payload.window_seconds,
+                ),
+            )
+            item["analysisId"] = job["id"]
+            queued_ids.append(job["id"])
+        matched_rows.append(item)
+
+    with store.connect() as db:
+        store.append_audit(
+            db,
+            "journal.matched",
+            clip["id"],
+            f"Matched {sum(1 for r in matched_rows if r['inClip'])}/{len(matched_rows)} ATM journal row(s); queued {len(queued_ids)}",
+            now(),
+        )
+    return {
+        "clipId": clip["id"],
+        "clipFilename": clip["filename"],
+        "totalRows": len(matched_rows),
+        "inClipCount": sum(1 for r in matched_rows if r["inClip"]),
+        "queuedAnalyses": queued_ids,
+        "rows": matched_rows[:100],
+    }
+
+
+@app.post("/api/demo/load")
+def load_demo_dataset() -> dict:
+    """Ingest clearly labelled local synthetic/pilot clips for immediate hackathon demo."""
+    created_clips = []
+    feed_map = [
+        ("ATM-01", "demo_atm_vestibule.mp4", store.DEMO_FEEDS / "cam_01_vestibule.mp4"),
+        ("ATM-02", "demo_atm_keypad.mp4", store.DEMO_FEEDS / "cam_02_keypad.mp4"),
+    ]
+    existing = {c["filename"]: c for c in list_clips()}
+    for cam_id, target_name, src in feed_map:
+        if target_name in existing:
+            created_clips.append(existing[target_name])
+        elif src.is_file():
+            created_clips.append(_ingest_local_file(src, target_name, cam_id))
+    with store.connect() as db:
+        store.append_audit(db, "demo.loaded", "hackathon-ps04", f"Loaded {len(created_clips)} local demo clips", now())
+    sample_journal = (
+        "timestamp,txn_ref,atm_id,status\n"
+        "2026-11-26T14:20:06,TXN-RJP-8841,ATM-02,DISPUTED_SKIM_ALERT\n"
+        "2026-11-26T14:20:14,TXN-RJP-8842,ATM-02,CASH_WITHDRAWAL\n"
+        "2026-11-26T14:25:00,TXN-RJP-8849,ATM-02,OUTSIDE_WINDOW\n"
+    )
+    return {
+        "clips": created_clips,
+        "recommendedClipStart": "2026-11-26T14:20:00",
+        "recommendedClipTime": "00:00:04",
+        "sampleJournalCsv": sample_journal,
+        "notice": "Clearly labelled local pilot/demo footage loaded. No real personal data or live bank connection.",
+    }
+
+
+@app.get("/api/streams")
+def stream_status() -> dict:
+    return streams.manager.status()
+
+
+@app.post("/api/streams/toggle")
+def toggle_streams(payload: StreamToggleRequest) -> dict:
+    if payload.running:
+        streams.manager.start()
+        action = "streams.started"
+        note = "Started 4-stream local person-detection surveillance pilot"
+    else:
+        streams.manager.stop()
+        action = "streams.stopped"
+        note = "Stopped 4-stream local surveillance pilot"
+    with store.connect() as db:
+        store.append_audit(db, action, "4-stream-wall", note, now())
+    return streams.manager.status()
+
+
+@app.get("/api/streams/detections")
+def stream_detections(limit: int = 40) -> list[dict]:
+    with store.connect() as db:
+        rows = db.execute("SELECT * FROM stream_detections ORDER BY occurred_at DESC LIMIT ?", (max(1, min(limit, 200)),)).fetchall()
+    return [
+        {
+            "id": r["id"],
+            "cameraId": r["camera_id"],
+            "trackId": r["track_id"],
+            "personCount": r["person_count"],
+            "confidence": round(float(r["confidence"]) * 100, 1),
+            "alertKind": r["alert_kind"],
+            "occurredAt": r["occurred_at"],
+            "details": store.json_load(r["details_json"], {}),
+        }
+        for r in rows
+    ]
+
+
+@app.get("/api/streams/{stream_id}/frame.jpg")
+def stream_snapshot(stream_id: str) -> StreamingResponse:
+    try:
+        jpg = streams.manager.snapshot_jpeg(stream_id)
+    except KeyError as exc:
+        raise HTTPException(404, "Unknown stream ID.") from exc
+    return StreamingResponse(io.BytesIO(jpg), media_type="image/jpeg", headers={"Cache-Control": "no-store"})
+
+
+@app.get("/api/streams/{stream_id}/mjpeg")
+def stream_mjpeg(stream_id: str) -> StreamingResponse:
+    if stream_id not in {item["id"] for item in streams.STREAM_CATALOG}:
+        raise HTTPException(404, "Unknown stream ID.")
+    return StreamingResponse(
+        streams.manager.mjpeg_generator(stream_id),
+        media_type="multipart/x-mixed-replace; boundary=frame",
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.get("/api/streams/{stream_id}/latest-face.jpg")
+def stream_latest_face(stream_id: str) -> StreamingResponse:
+    try:
+        jpg = streams.manager.latest_face_jpeg(stream_id)
+    except KeyError as exc:
+        raise HTTPException(404, "Unknown stream ID.") from exc
+    if not jpg:
+        raise HTTPException(404, "No live face capture on this stream yet.")
+    return StreamingResponse(io.BytesIO(jpg), media_type="image/jpeg", headers={"Cache-Control": "no-store"})
+
+
+@app.post("/api/streams/{stream_id}/source")
+def set_stream_source(stream_id: str, payload: StreamSourceRequest) -> dict:
+    try:
+        status = streams.manager.set_custom_source(stream_id, payload.source)
+    except KeyError as exc:
+        raise HTTPException(404, "Unknown stream ID.") from exc
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    with store.connect() as db:
+        store.append_audit(db, "streams.source_changed", stream_id, f"Set stream source to {payload.source.strip() or 'default'}", now())
+    return status
+
+
+@app.post("/api/streams/{stream_id}/capture")
+def capture_stream_to_case(stream_id: str) -> dict:
+    item = next((s for s in streams.STREAM_CATALOG if s["id"] == stream_id), None)
+    if not item:
+        raise HTTPException(404, "Unknown stream ID.")
+    temp_capture = store.UPLOADS / f"live-buf-{uuid.uuid4().hex}.mp4"
+    used_live_buffer = False
+    try:
+        if streams.manager.export_live_buffer(stream_id, temp_capture):
+            used_live_buffer = True
+            clip = _ingest_local_file(
+                temp_capture,
+                f"live-{stream_id.lower()}-{datetime.now(timezone.utc).strftime('%H%M%S')}.mp4",
+                item["channelId"],
+            )
+        else:
+            feed_file = item.get("feedFile", "")
+            src = (store.DEMO_FEEDS / feed_file) if feed_file else None
+            if src is None or not src.is_file():
+                raise HTTPException(422, f"{stream_id} has no assigned video or live IP Webcam feed yet.")
+            clip = _ingest_local_file(
+                src,
+                f"capture-{stream_id.lower()}-{datetime.now(timezone.utc).strftime('%H%M%S')}.mp4",
+                item["channelId"],
+            )
+    finally:
+        temp_capture.unlink(missing_ok=True)
+    with store.connect() as db:
+        store.append_audit(
+            db,
+            "streams.captured_to_case",
+            clip["id"],
+            f"Captured {'live IP/buffered stream' if used_live_buffer else 'pilot feed'} {stream_id} into {item['channelId']}",
+            now(),
+        )
+    return clip
+
+
+@app.post("/api/events/clear-stream-alerts")
+def clear_stream_alerts() -> dict:
+    with store.connect() as db:
+        cur = db.execute("DELETE FROM events WHERE kind LIKE 'stream.%'")
+        store.append_audit(db, "streams.alerts_cleared", "4-stream-wall", f"Cleared {cur.rowcount} stream alert notification(s)", now())
+    return {"cleared": cur.rowcount}
+
+
+@app.get("/api/watchlist")
+def list_watchlist() -> list[dict]:
+    with store.connect() as db:
+        rows = db.execute("SELECT * FROM case_watchlist ORDER BY created_at DESC").fetchall()
+    return [
+        {
+            "id": r["id"],
+            "label": r["label"],
+            "caseRef": r["case_ref"],
+            "candidateId": r["candidate_id"],
+            "clipId": r["clip_id"],
+            "createdAt": r["created_at"],
+            "imageUrl": f"/api/watchlist/{r['id']}/image",
+        }
+        for r in rows
+    ]
+
+
+@app.post("/api/watchlist", status_code=201)
+def add_to_watchlist(payload: WatchlistRequest) -> dict:
+    cand = _candidate_or_404(payload.candidate_id)
+    descriptor = store.json_load(cand["descriptor_json"], [])
+    if not descriptor:
+        raise HTTPException(422, "Selected candidate has no face embedding.")
+    entry_id = uuid.uuid4().hex
+    stamp = now()
+    with store.connect() as db:
+        db.execute(
+            "INSERT INTO case_watchlist VALUES(?,?,?,?,?,?,?,?)",
+            (
+                entry_id,
+                payload.label.strip(),
+                payload.case_ref.strip(),
+                cand["id"],
+                cand["clip_id"],
+                cand["descriptor_json"],
+                cand["image_path"],
+                stamp,
+            ),
+        )
+        store.append_audit(
+            db,
+            "watchlist.flagged",
+            entry_id,
+            f"Flagged local case suspect '{payload.label.strip()}' for live cross-camera SFace alerting",
+            stamp,
+        )
+    return {
+        "id": entry_id,
+        "label": payload.label.strip(),
+        "caseRef": payload.case_ref.strip(),
+        "candidateId": cand["id"],
+        "clipId": cand["clip_id"],
+        "createdAt": stamp,
+        "imageUrl": f"/api/watchlist/{entry_id}/image",
+    }
+
+
+@app.get("/api/watchlist/{entry_id}/image")
+def watchlist_image(entry_id: str) -> FileResponse:
+    with store.connect() as db:
+        row = db.execute("SELECT image_path FROM case_watchlist WHERE id=?", (entry_id,)).fetchone()
+    if not row or not Path(row["image_path"]).is_file():
+        raise HTTPException(404, "Watchlist image not found.")
+    return FileResponse(row["image_path"], media_type="image/jpeg", headers={"Cache-Control": "private, no-store"})
+
+
+@app.delete("/api/watchlist/{entry_id}")
+def delete_watchlist(entry_id: str) -> dict:
+    with store.connect() as db:
+        cur = db.execute("DELETE FROM case_watchlist WHERE id=?", (entry_id,))
+        if cur.rowcount == 0:
+            raise HTTPException(404, "Watchlist entry not found.")
+        store.append_audit(db, "watchlist.removed", entry_id, "Removed suspect from local live watchlist", now())
+    return {"deleted": entry_id}
+
+
+@app.get("/api/cases/journey")
+def case_journey() -> dict:
+    """
+    Build a unified Multi-Camera Suspect Journey & Fraud Intelligence Brief
+    correlating ATM clips, transaction-linked analyses, SFace cross-clip matches,
+    live surveillance sightings, and custody verification status.
+    """
+    with store.connect() as db:
+        clips = [dict(r) for r in db.execute("SELECT * FROM clips ORDER BY uploaded_at ASC").fetchall()]
+        analyses_rows = [
+            dict(r)
+            for r in db.execute(
+                "SELECT a.*, c.camera_id, c.filename FROM analyses a JOIN clips c ON c.id=a.clip_id ORDER BY a.created_at ASC"
+            ).fetchall()
+        ]
+        cand_rows = [dict(r) for r in db.execute("SELECT * FROM candidates ORDER BY score DESC").fetchall()]
+        event_rows = [dict(r) for r in db.execute("SELECT * FROM events ORDER BY occurred_at DESC LIMIT 80").fetchall()]
+        watchlist_rows = [dict(r) for r in db.execute("SELECT * FROM case_watchlist ORDER BY created_at DESC").fetchall()]
+        audit_state = store.verify_audit(db)
+
+    timeline: list[dict] = []
+    for c in clips:
+        timeline.append(
+            {
+                "id": f"clip-{c['id']}",
+                "stage": "INGEST",
+                "cameraId": c["camera_id"],
+                "title": f"Footage ingested: {c['filename']}",
+                "detail": f"SHA-256 {c['sha256'][:16]}… · {c['duration']:.1f}s · {c['width']}×{c['height']}",
+                "timestamp": c["uploaded_at"],
+                "severity": "info",
+            }
+        )
+
+    best_score = 0.0
+    occlusion_flags: set[str] = set()
+    selected_cands = [c for c in cand_rows if c["review_status"] == "selected"]
+    for c in cand_rows:
+        best_score = max(best_score, float(c["score"]))
+        for fl in store.json_load(c["flags_json"], []):
+            if fl.startswith("possible "):
+                occlusion_flags.add(fl)
+
+    for a in analyses_rows:
+        res = store.json_load(a["result_json"], {})
+        timeline.append(
+            {
+                "id": f"ana-{a['id']}",
+                "stage": "TRANSACTION_LINK",
+                "cameraId": a["camera_id"],
+                "title": f"Transaction {a['transaction_ref'] or a['transaction_time']} ({a['case_ref'] or 'Case'})",
+                "detail": f"{res.get('candidateCount', 0)} face candidates · {res.get('peopleSeen', 0)} person tracks · {res.get('embeddingModel', 'local')}",
+                "timestamp": a["created_at"],
+                "severity": "warning" if res.get("alerts") else "info",
+                "analysisId": a["id"],
+            }
+        )
+
+    alert_events = [e for e in event_rows if e["kind"].startswith(("suspicious.", "stream."))]
+    for e in alert_events[:25]:
+        details = store.json_load(e["details_json"], {})
+        timeline.append(
+            {
+                "id": f"evt-{e['id']}",
+                "stage": "BEHAVIOUR_ALERT",
+                "cameraId": details.get("cameraId", "ATM"),
+                "title": e["kind"].replace(".", " · ").upper(),
+                "detail": e["message"],
+                "timestamp": e["occurred_at"],
+                "severity": e["severity"],
+            }
+        )
+
+    timeline.sort(key=lambda item: item["timestamp"], reverse=True)
+
+    # Cross-camera SFace correlation across uploaded clips
+    cross_links: list[dict] = []
+    anchors = selected_cands or cand_rows[:3]
+    seen_pairs: set[tuple[str, str]] = set()
+    for anchor in anchors[:3]:
+        avec = store.json_load(anchor["descriptor_json"], [])
+        if not avec:
+            continue
+        for other in cand_rows:
+            if other["clip_id"] == anchor["clip_id"]:
+                continue
+            ovec = store.json_load(other["descriptor_json"], [])
+            sim = analysis.descriptor_similarity(avec, ovec)
+            if sim is not None and sim >= 0.55:
+                pair = tuple(sorted([anchor["clip_id"], other["clip_id"]]))
+                if pair in seen_pairs:
+                    continue
+                seen_pairs.add(pair)
+                c1 = next((cl for cl in clips if cl["id"] == anchor["clip_id"]), None)
+                c2 = next((cl for cl in clips if cl["id"] == other["clip_id"]), None)
+                src_cam = c1["camera_id"] if c1 else "CLIP-A"
+                dst_cam = c2["camera_id"] if c2 else "CLIP-B"
+                if src_cam == dst_cam:
+                    continue
+                cross_links.append(
+                    {
+                        "sourceCamera": src_cam,
+                        "targetCamera": dst_cam,
+                        "similarity": round(sim * 100, 1),
+                        "sourceCandidateId": anchor["id"],
+                        "targetCandidateId": other["id"],
+                        "targetAnalysisId": other["analysis_id"],
+                    }
+                )
+
+    channels_covered = len({c["camera_id"] for c in clips})
+    readiness_score = min(
+        100,
+        (25 if audit_state.get("verified") else 0)
+        + min(25, channels_covered * 8)
+        + (25 if cand_rows else 0)
+        + (25 if selected_cands or cross_links else (10 if analyses_rows else 0)),
+    )
+
+    return {
+        "readinessScore": readiness_score,
+        "auditVerified": bool(audit_state.get("verified")),
+        "channelsCovered": channels_covered,
+        "clipCount": len(clips),
+        "completedAnalyses": sum(1 for a in analyses_rows if a["status"] == "completed"),
+        "selectedSuspects": len(selected_cands),
+        "bestFaceQuality": round(best_score, 1),
+        "occlusionFlags": sorted(occlusion_flags),
+        "watchlistCount": len(watchlist_rows),
+        "alertCount": len(alert_events),
+        "crossLinks": cross_links,
+        "timeline": timeline[:40],
+        "notice": "Decision-support correlation across workspace evidence only. Requires investigator verification.",
+    }
 
 
 @app.get("/api/events")
 def list_events(limit: int = 100) -> list[dict]:
     with store.connect() as db:
         rows = db.execute("SELECT * FROM events ORDER BY occurred_at DESC LIMIT ?", (max(1, min(limit, 500)),)).fetchall()
-    return [{"id": r["id"], "analysisId": r["analysis_id"], "clipId": r["clip_id"],
-             "kind": r["kind"], "message": r["message"], "severity": r["severity"],
-             "occurredAt": r["occurred_at"], "details": store.json_load(r["details_json"], {})}
-            for r in rows]
+    return [
+        {
+            "id": r["id"],
+            "analysisId": r["analysis_id"],
+            "clipId": r["clip_id"],
+            "kind": r["kind"],
+            "message": r["message"],
+            "severity": r["severity"],
+            "occurredAt": r["occurred_at"],
+            "details": store.json_load(r["details_json"], {}),
+        }
+        for r in rows
+    ]
 
 
 @app.get("/api/audit")
 def list_audit(limit: int = 100) -> list[dict]:
     with store.connect() as db:
         rows = db.execute("SELECT * FROM audit_log ORDER BY occurred_at DESC LIMIT ?", (max(1, min(limit, 500)),)).fetchall()
-    return [{"id": r["id"], "action": r["action"], "subjectId": r["subject_id"],
-             "note": r["note"], "occurredAt": r["occurred_at"], "entryHash": r["entry_hash"]} for r in rows]
+    return [
+        {
+            "id": r["id"],
+            "action": r["action"],
+            "subjectId": r["subject_id"],
+            "note": r["note"],
+            "occurredAt": r["occurred_at"],
+            "entryHash": r["entry_hash"],
+        }
+        for r in rows
+    ]
 
 
 @app.get("/api/audit/integrity")
 def audit_integrity() -> dict:
     with store.connect() as db:
         return store.verify_audit(db)
+
+
+@app.get("/api/audit/export")
+def export_audit(format: str = "json") -> StreamingResponse:
+    with store.connect() as db:
+        integrity = store.verify_audit(db)
+        rows = db.execute("SELECT * FROM audit_log ORDER BY rowid ASC").fetchall()
+    if format == "csv":
+        buf = io.StringIO()
+        writer = csv.writer(buf)
+        writer.writerow(["id", "occurred_at", "action", "subject_id", "note", "previous_hash", "entry_hash"])
+        for r in rows:
+            writer.writerow([r["id"], r["occurred_at"], r["action"], r["subject_id"], r["note"], r["previous_hash"], r["entry_hash"]])
+        return StreamingResponse(
+            io.BytesIO(buf.getvalue().encode("utf-8")),
+            media_type="text/csv",
+            headers={"Content-Disposition": 'attachment; filename="drishti-audit-trail.csv"'},
+        )
+    payload = sign_manifest(
+        {
+            "exportedAt": now(),
+            "integrity": integrity,
+            "entries": [dict(r) for r in rows],
+        }
+    )
+    return StreamingResponse(
+        io.BytesIO(json.dumps(payload, indent=2).encode("utf-8")),
+        media_type="application/json",
+        headers={"Content-Disposition": 'attachment; filename="drishti-audit-trail.json"'},
+    )
 
 
 @app.get("/api/reports")
@@ -818,10 +1776,94 @@ def reports() -> dict:
         reviews = db.execute("SELECT review_status, COUNT(*) count FROM candidates GROUP BY review_status").fetchall()
         quality = db.execute("SELECT AVG(score), MAX(score), MIN(score) FROM candidates").fetchone()
         event_rows = db.execute("SELECT kind, COUNT(*) count FROM events GROUP BY kind").fetchall()
-    return {"analyses": {r["status"]: r["count"] for r in analyses},
-            "reviews": {r["review_status"]: r["count"] for r in reviews},
-            "quality": {"average": round(quality[0] or 0, 1), "best": round(quality[1] or 0, 1), "lowest": round(quality[2] or 0, 1)},
-            "events": {r["kind"]: r["count"] for r in event_rows}}
+        flag_rows = db.execute("SELECT flags_json FROM candidates").fetchall()
+        stream_rows = db.execute("SELECT camera_id, COUNT(*) count, SUM(person_count) people FROM stream_detections GROUP BY camera_id").fetchall()
+    flag_counts: dict[str, int] = {}
+    for row in flag_rows:
+        for flag in store.json_load(row["flags_json"], []):
+            flag_counts[flag] = flag_counts.get(flag, 0) + 1
+    return {
+        "analyses": {r["status"]: r["count"] for r in analyses},
+        "reviews": {r["review_status"]: r["count"] for r in reviews},
+        "quality": {
+            "average": round(quality[0] or 0, 1),
+            "best": round(quality[1] or 0, 1),
+            "lowest": round(quality[2] or 0, 1),
+        },
+        "events": {r["kind"]: r["count"] for r in event_rows},
+        "flags": flag_counts,
+        "streams": {r["camera_id"]: {"events": r["count"], "detections": r["people"] or 0} for r in stream_rows},
+    }
+
+
+def _build_evidence_manifest(analysis_id: str) -> dict:
+    record = get_analysis(analysis_id)
+    if record["status"] != "completed":
+        raise HTTPException(409, "Evidence manifest is available after analysis completes.")
+    clip = _clip_or_404(record["clipId"])
+    with store.connect() as db:
+        audit_state = store.verify_audit(db)
+        candidate_rows = db.execute("SELECT id, image_path FROM candidates WHERE analysis_id=?", (analysis_id,)).fetchall()
+    crop_hashes = {}
+    for row in candidate_rows:
+        p = Path(row["image_path"])
+        if p.is_file():
+            crop_hashes[row["id"]] = _file_sha256(p)
+    manifest = {
+        "schema": "drishti.evidence.manifest.v1",
+        "analysisId": analysis_id,
+        "caseRef": record.get("caseRef") or "UNASSIGNED",
+        "generatedAt": now(),
+        "clip": {
+            "id": clip["id"],
+            "filename": clip["filename"],
+            "cameraId": clip["camera_id"],
+            "sourceSha256": clip["sha256"],
+            "analysisSha256": clip["analysis_sha256"],
+        },
+        "transaction": {
+            "timeMode": record["timeMode"],
+            "transactionTime": record["transactionTime"],
+            "clipStartTime": record["clipStartTime"],
+            "transactionRef": record["transactionRef"],
+            "windowSeconds": record["windowSeconds"],
+        },
+        "auditHeadHash": audit_state.get("headHash", ""),
+        "candidates": [
+            {
+                "id": c["id"],
+                "timeLabel": c["timeLabel"],
+                "trackId": c["trackId"],
+                "score": c["score"],
+                "flags": c["flags"],
+                "reviewStatus": c["reviewStatus"],
+                "note": c["note"],
+                "cropSha256": crop_hashes.get(c["id"], ""),
+            }
+            for c in record["candidates"]
+        ],
+        "disclaimer": "Machine scores and similarity cues assist human review and do not establish identity or guilt.",
+    }
+    return sign_manifest(manifest)
+
+
+@app.get("/api/evidence/{analysis_id}/manifest.json")
+def evidence_manifest(analysis_id: str) -> StreamingResponse:
+    signed = _build_evidence_manifest(analysis_id)
+    with store.connect() as db:
+        store.append_audit(
+            db,
+            "evidence.manifest_exported",
+            analysis_id,
+            f"Signed HMAC-SHA256 evidence manifest exported ({signed['seal']['payloadSha256'][:16]}…)",
+            now(),
+        )
+    safe_id = re.sub(r"[^a-zA-Z0-9-]", "", analysis_id)[:24]
+    return StreamingResponse(
+        io.BytesIO(json.dumps(signed, indent=2).encode("utf-8")),
+        media_type="application/json",
+        headers={"Content-Disposition": f'attachment; filename="evidence-{quote(safe_id)}-manifest.json"'},
+    )
 
 
 @app.get("/api/evidence/{analysis_id}.pdf")
@@ -829,6 +1871,7 @@ def evidence_pdf(analysis_id: str) -> StreamingResponse:
     record = get_analysis(analysis_id)
     if record["status"] != "completed":
         raise HTTPException(409, "Evidence sheet is available after analysis completes.")
+    signed = _build_evidence_manifest(analysis_id)
     output = io.BytesIO()
     pdf = canvas.Canvas(output, pagesize=A4)
     page_w, page_h = A4
@@ -837,28 +1880,44 @@ def evidence_pdf(analysis_id: str) -> StreamingResponse:
     pdf.setFillColor(navy)
     pdf.rect(0, page_h - 92, page_w, 92, fill=1, stroke=0)
     pdf.setFillColor(colors.white)
-    pdf.setFont("Helvetica-Bold", 19)
-    pdf.drawString(42, page_h - 42, "DRISHTI  /  EVIDENCE REVIEW")
+    pdf.setFont("Helvetica-Bold", 18)
+    pdf.drawString(42, page_h - 40, "DRISHTI  /  FORENSIC EVIDENCE SHEET")
     pdf.setFont("Helvetica", 9)
-    pdf.drawString(42, page_h - 62, "LOCAL PRODUCT PILOT  •  HUMAN REVIEW REQUIRED")
+    pdf.drawString(42, page_h - 58, "LOCAL WORKSTATION PILOT  •  HUMAN VERIFICATION REQUIRED  •  HMAC-SHA256 SEALED")
+    pdf.drawString(42, page_h - 72, f"Case / FIR Ref: {record.get('caseRef') or 'Not assigned'}   |   Embedding: {record['result'].get('embeddingModel', 'local')}")
+
     pdf.setFillColor(colors.HexColor("#263445"))
-    pdf.setFont("Helvetica-Bold", 12)
-    pdf.drawString(42, page_h - 122, "TRANSACTION CONTEXT")
-    pdf.setFont("Helvetica", 10)
-    pdf.drawString(42, page_h - 143, f"Clip: {record['clipName'][:90]}")
+    pdf.setFont("Helvetica-Bold", 11)
+    pdf.drawString(42, page_h - 118, "TRANSACTION & CHAIN-OF-CUSTODY PROVENANCE")
+    pdf.setFont("Helvetica", 9)
+    pdf.drawString(42, page_h - 135, f"Clip: {record['clipName'][:85]}")
     time_label = "clip-relative" if record["timeMode"] == "clip" else f"bank time; clip starts {record['clipStartTime']}"
-    pdf.drawString(42, page_h - 160, f"Transaction time ({time_label}): {record['transactionTime']}   |   Window: ±{record['windowSeconds']} s")
-    pdf.drawString(42, page_h - 177, f"Reference: {record['transactionRef'] or 'Not supplied'}   |   Analysis ID: {analysis_id[:16]}")
+    pdf.drawString(42, page_h - 150, f"Transaction time ({time_label}): {record['transactionTime']}   |   Window: ±{record['windowSeconds']} s")
+    pdf.drawString(42, page_h - 165, f"Reference: {record['transactionRef'] or 'Not supplied'}   |   Analysis ID: {analysis_id[:16]}")
     clip = _clip_or_404(record["clipId"])
     pdf.setFont("Helvetica", 7)
-    pdf.drawString(42, page_h - 191, f"Uploaded source SHA-256: {clip['sha256']}")
-    pdf.drawString(42, page_h - 202, f"Analyzed file SHA-256: {clip['analysis_sha256']}")
+    pdf.drawString(42, page_h - 179, f"Source SHA-256:   {clip['sha256']}")
+    pdf.drawString(42, page_h - 190, f"Analysis SHA-256: {clip['analysis_sha256']}")
+    pdf.drawString(42, page_h - 201, f"Manifest Seal (HMAC-SHA256): {signed['seal']['signature']}")
     pdf.setStrokeColor(amber)
     pdf.setLineWidth(2)
-    pdf.line(42, page_h - 212, page_w - 42, page_h - 212)
-    y = page_h - 236
+    pdf.line(42, page_h - 210, page_w - 42, page_h - 210)
+
+    y = page_h - 232
+    alerts = record["result"].get("alerts") or []
+    if alerts:
+        pdf.setFillColor(colors.HexColor("#8a4b16"))
+        pdf.setFont("Helvetica-Bold", 9)
+        pdf.drawString(42, y, f"BEHAVIOUR / RELIABILITY ALERTS ({len(alerts)}):")
+        y -= 13
+        pdf.setFont("Helvetica", 8)
+        for alert in alerts[:3]:
+            pdf.drawString(50, y, f"• {alert.get('message', '')[:95]}")
+            y -= 12
+        y -= 6
+
     for index, candidate in enumerate(record["candidates"][:8], start=1):
-        if y < 135:
+        if y < 140:
             pdf.showPage()
             y = page_h - 55
         image_path = Path(_candidate_or_404(candidate["id"])["image_path"])
@@ -876,17 +1935,23 @@ def evidence_pdf(analysis_id: str) -> StreamingResponse:
         pdf.setStrokeColor(colors.HexColor("#dce3ea"))
         pdf.line(42, y - 94, page_w - 42, y - 94)
         y -= 108
+
     pdf.setFillColor(colors.HexColor("#8a4b16"))
     pdf.setFont("Helvetica-Bold", 9)
     pdf.drawString(42, 60, "SIMILARITY AND QUALITY SCORES ARE REVIEW AIDS, NOT IDENTIFICATION OR GUILT FINDINGS.")
     pdf.setFillColor(colors.HexColor("#647487"))
     pdf.setFont("Helvetica", 8)
-    pdf.drawString(42, 45, f"Generated locally at {now()} • Keep with the source clip and transaction record.")
+    pdf.drawString(42, 45, f"Generated locally at {now()} • Verify tamper seal against manifest.json in Security Center.")
     pdf.save()
     output.seek(0)
+    with store.connect() as db:
+        store.append_audit(db, "evidence.pdf_exported", analysis_id, f"Exported sealed PDF evidence sheet ({len(record['candidates'])} candidates)", now())
     safe_id = re.sub(r"[^a-zA-Z0-9-]", "", analysis_id)[:24]
-    return StreamingResponse(output, media_type="application/pdf",
-                             headers={"Content-Disposition": f'attachment; filename="evidence-{quote(safe_id)}.pdf"'})
+    return StreamingResponse(
+        output,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="evidence-{quote(safe_id)}.pdf"'},
+    )
 
 
 FRONTEND_DIST = store.ROOT / "dist"
@@ -896,6 +1961,14 @@ if (FRONTEND_DIST / "index.html").is_file():
     @app.get("/", include_in_schema=False)
     def frontend_root() -> FileResponse:
         return FileResponse(FRONTEND_DIST / "index.html")
+
+    @app.get("/favicon.ico", include_in_schema=False)
+    @app.get("/favicon.svg", include_in_schema=False)
+    def frontend_favicon() -> FileResponse:
+        svg = FRONTEND_DIST / "favicon.svg"
+        if svg.is_file():
+            return FileResponse(svg, media_type="image/svg+xml")
+        raise HTTPException(404, "Favicon not found")
 
     @app.get("/{full_path:path}", include_in_schema=False)
     def frontend_route(full_path: str) -> FileResponse:

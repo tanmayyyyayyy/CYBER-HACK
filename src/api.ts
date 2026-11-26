@@ -1,3 +1,23 @@
+export type ClipForensics = {
+  container?: {
+    probed?: boolean;
+    formatName?: string;
+    codecName?: string;
+    pixFmt?: string;
+    bitRateKbps?: number;
+    nbFrames?: number;
+    encoderTag?: string;
+    cues?: string[];
+  };
+  continuity?: {
+    checked?: boolean;
+    sampled?: number;
+    spliceCues?: number;
+    blackoutFrames?: number;
+    cues?: string[];
+  };
+};
+
 export type Clip = {
   id: string;
   filename: string;
@@ -12,6 +32,8 @@ export type Clip = {
   normalized: boolean;
   previewReady: boolean;
   sha256: string;
+  analysisSha256?: string;
+  forensics?: ClipForensics;
   uploadedAt: string;
   videoUrl: string;
   posterUrl: string;
@@ -25,11 +47,20 @@ export type Candidate = {
   timeLabel: string;
   trackId: number;
   score: number;
-  metrics: { sharpness: number; illumination: number; faceSize: number; pose: number; confidence: number };
+  metrics: { sharpness: number; illumination: number; faceSize: number; pose: number; confidence: number; occlusionFree?: number };
   flags: string[];
+  bbox?: number[];
   reviewStatus: 'unreviewed' | 'selected' | 'rejected';
   note: string;
   imageUrl: string;
+  enhancedUrl: string;
+  redactedFrameUrl: string;
+};
+
+export type AnalysisAlert = {
+  kind: string;
+  severity: string;
+  message: string;
 };
 
 export type Analysis = {
@@ -38,6 +69,7 @@ export type Analysis = {
   clipName: string;
   transactionTime: string;
   transactionRef: string;
+  caseRef?: string;
   timeMode: 'clip' | 'absolute';
   clipStartTime: string;
   windowSeconds: number;
@@ -49,16 +81,79 @@ export type Analysis = {
     windowEnd?: number;
     sampledFrames?: number;
     peopleSeen?: number;
+    primaryTerminalTrack?: number | null;
     candidateCount?: number;
+    embeddingModel?: string;
+    alerts?: AnalysisAlert[];
     reviewNote?: string;
     models?: Record<string, string>;
   };
   candidates: Candidate[];
 };
 
+export type SurveillanceStream = {
+  id: string;
+  channelId: string;
+  name: string;
+  zone: string;
+  status: string;
+  sourceAdapter: string;
+  sourceLabel: string;
+  customSource?: string;
+  isLiveCamera?: boolean;
+  sourceAvailable: boolean;
+  personCount: number;
+  faceCount?: number;
+  activeTracks: number;
+  fps: number;
+  framesProcessed: number;
+  alertState: 'clear' | 'active' | 'alert';
+  lastAlert: string;
+  watchlistHit?: string;
+  lastFrameAt: string;
+  hasFaceCapture?: boolean;
+  latestFaceScore?: number;
+  latestFaceFlags?: string[];
+  latestFaceAt?: string;
+  latestFaceUrl?: string;
+  mjpegUrl: string;
+  snapshotUrl: string;
+};
+
+export type StreamsResponse = {
+  running: boolean;
+  detector: string;
+  mode: string;
+  notice: string;
+  streams: SurveillanceStream[];
+};
+
+export type StreamDetection = {
+  id: string;
+  cameraId: string;
+  trackId: number;
+  personCount: number;
+  confidence: number;
+  alertKind: string;
+  occurredAt: string;
+  details: Record<string, unknown>;
+};
+
+export type JournalRow = {
+  row: number;
+  timestamp: string;
+  txnRef: string;
+  atmId: string;
+  status: string;
+  offsetSeconds: number;
+  inClip: boolean;
+  disputed: boolean;
+  analysisId?: string;
+};
+
 export type CameraSlot = { id: string; label: string; clips: Clip[]; status: string; source: string };
-export type Health = { status: string; service: string; models: Record<string, string>; ffmpeg: boolean; cloud: string };
-export type AuditItem = { id: string; action: string; subjectId: string; note: string; occurredAt: string };
+export type Health = { status: string; service: string; models: Record<string, string>; ffmpeg: boolean; ffprobe?: boolean; cloud: string };
+export type AuditItem = { id: string; action: string; subjectId: string; note: string; occurredAt: string; entryHash?: string };
 export type AuditIntegrity = { verified: boolean; entriesChecked: number; headHash?: string; entryId?: string; reason?: string; limitation?: string };
 export type EventItem = { id: string; kind: string; message: string; severity: string; occurredAt: string };
 export type AuthUser = { id: string; email: string; displayName: string; role: 'administrator' | 'investigator'; status: string; createdAt: string };
@@ -70,9 +165,61 @@ export type SecurityOverview = {
   accounts: { active: number; pending: number; failedSignins24h: number };
   evidence: { clipCount: number; lastFullCheck: null | { checkedAt: string; clipsChecked: number; mismatchCount: number } };
   backup: DatabaseBackup | null;
+  signingKey?: { present: boolean; permissions: { restricted: boolean; mode: string } };
   hostEncryption: { status: string; message: string };
   networkBoundary: { status: string; message: string };
 };
+export type WatchlistEntry = {
+  id: string;
+  label: string;
+  caseRef: string;
+  candidateId: string;
+  clipId: string;
+  createdAt: string;
+  imageUrl: string;
+};
+
+export type CaseJourney = {
+  readinessScore: number;
+  auditVerified: boolean;
+  channelsCovered: number;
+  clipCount: number;
+  completedAnalyses: number;
+  selectedSuspects: number;
+  bestFaceQuality: number;
+  occlusionFlags: string[];
+  watchlistCount: number;
+  alertCount: number;
+  crossLinks: {
+    sourceCamera: string;
+    targetCamera: string;
+    similarity: number;
+    sourceCandidateId: string;
+    targetCandidateId: string;
+    targetAnalysisId: string;
+  }[];
+  timeline: {
+    id: string;
+    stage: string;
+    cameraId: string;
+    title: string;
+    detail: string;
+    timestamp: string;
+    severity: string;
+    analysisId?: string;
+  }[];
+  notice: string;
+};
+
+export type ReportsData = {
+  analyses: Record<string, number>;
+  reviews: Record<string, number>;
+  quality: { average: number; best: number; lowest: number };
+  events: Record<string, number>;
+  flags?: Record<string, number>;
+  streams?: Record<string, { events: number; detections: number }>;
+};
+
 let csrfToken = '';
 export const setCsrfToken = (value: string) => { csrfToken = value; };
 
@@ -89,7 +236,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
-  authBootstrap: () => request<{ needsAdministrator: boolean }>('/auth/bootstrap'),
+  authBootstrap: () => request<{ needsAdministrator: boolean; authenticated?: boolean }>('/auth/bootstrap'),
   authMe: async () => { const result = await request<{ user: AuthUser; csrfToken: string }>('/auth/me'); setCsrfToken(result.csrfToken); return result; },
   authLogin: async (email: string, password: string) => { const result = await request<{ user: AuthUser; csrfToken: string }>('/auth/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email, password }) }); setCsrfToken(result.csrfToken); return result; },
   authSignup: async (displayName: string, email: string, password: string) => { const result = await request<{ user: AuthUser; csrfToken: string | null; approvalRequired: boolean }>('/auth/signup', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ display_name: displayName, email, password }) }); if (result.csrfToken) setCsrfToken(result.csrfToken); return result; },
@@ -98,9 +245,11 @@ export const api = {
   updateAccount: (id: string, status: 'active' | 'disabled') => request<AuthUser>(`/auth/users/${id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ status }) }),
   securityOverview: () => request<SecurityOverview>('/security/overview'),
   verifyAllEvidence: () => request<{ checked: number; verified: number; mismatches: { clipId: string; filename: string; sourceMatches: boolean; analysisMatches: boolean }[]; checkedAt: string; notice: string }>('/security/evidence-check', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ clip_ids: [] }) }),
+  verifyManifest: (manifest: unknown) => request<{ verified: boolean; payloadSha256?: string; algorithm?: string; reason?: string }>('/security/verify-manifest', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ manifest }) }),
   databaseBackups: () => request<DatabaseBackup[]>('/security/database-backups'),
   createDatabaseBackup: (passphrase: string) => request<DatabaseBackup>('/security/database-backups', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ passphrase }) }),
   health: () => request<Health>('/health'),
+  dvrGuidance: () => request<{ supportedExtensions: string[]; guidance: { vendor: string; steps: string }[] }>('/dvr-guidance'),
   overview: () => request<{ clips: number; analyses: number; candidates: number; pending: number }>('/overview'),
   clips: () => request<Clip[]>('/clips'),
   cameras: () => request<CameraSlot[]>('/cameras'),
@@ -109,16 +258,31 @@ export const api = {
   events: () => request<EventItem[]>('/events'),
   audit: () => request<AuditItem[]>('/audit'),
   auditIntegrity: () => request<AuditIntegrity>('/audit/integrity'),
-  reports: () => request<{ analyses: Record<string, number>; reviews: Record<string, number>; quality: { average: number; best: number; lowest: number }; events: Record<string, number> }>('/reports'),
-  upload: (file: File, cameraId: string) => request<Clip>(`/clips?filename=${encodeURIComponent(file.name)}&camera_id=${cameraId}`, {
+  reports: () => request<ReportsData>('/reports'),
+  streams: () => request<StreamsResponse>('/streams'),
+  toggleStreams: (running: boolean) => request<StreamsResponse>('/streams/toggle', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ running }) }),
+  setStreamSource: (streamId: string, source: string) => request<StreamsResponse>(`/streams/${streamId}/source`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ source }) }),
+  streamDetections: () => request<StreamDetection[]>('/streams/detections'),
+  captureStream: (streamId: string) => request<Clip>(`/streams/${streamId}/capture`, { method: 'POST' }),
+  loadDemo: () => request<{ clips: Clip[]; recommendedClipStart: string; recommendedClipTime: string; sampleJournalCsv: string; notice: string }>('/demo/load', { method: 'POST' }),
+  matchJournal: (payload: { clip_id: string; clip_start_time: string; csv_text: string; window_seconds: number; auto_queue: boolean }) =>
+    request<{ clipId: string; clipFilename: string; totalRows: number; inClipCount: number; queuedAnalyses: string[]; rows: JournalRow[] }>('/journal/match', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
+    }),
+  upload: (file: File, cameraId: string, replaceClipId = '') => request<Clip>(`/clips?filename=${encodeURIComponent(file.name)}&camera_id=${cameraId}${replaceClipId ? `&replace_clip_id=${encodeURIComponent(replaceClipId)}` : ''}`, {
     method: 'POST', headers: { 'Content-Type': 'application/octet-stream' }, body: file,
   }),
-  analyze: (payload: { clip_id: string; transaction_time: string; time_mode: 'clip' | 'absolute'; clip_start_time: string; transaction_ref: string; window_seconds: number }) =>
+  clearStreamAlerts: () => request<{ cleared: number }>('/events/clear-stream-alerts', { method: 'POST' }),
+  watchlist: () => request<WatchlistEntry[]>('/watchlist'),
+  addToWatchlist: (candidate_id: string, label: string, case_ref = '') => request<WatchlistEntry>('/watchlist', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ candidate_id, label, case_ref }) }),
+  removeWatchlist: (id: string) => request(`/watchlist/${id}`, { method: 'DELETE' }),
+  caseJourney: () => request<CaseJourney>('/cases/journey'),
+  analyze: (payload: { clip_id: string; transaction_time: string; time_mode: 'clip' | 'absolute'; clip_start_time: string; transaction_ref: string; case_ref?: string; window_seconds: number }) =>
     request<{ id: string; status: string }>('/analyses', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }),
   review: (id: string, status: Candidate['reviewStatus'], note: string) =>
     request(`/candidates/${id}/review`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ status, note }) }),
-  search: (id: string) => request<{ matches: (Candidate & { similarity: number; filename: string })[]; notice: string }>('/search', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ candidate_id: id }),
+  search: (id: string, threshold = 0.52) => request<{ embeddingType?: string; matches: (Candidate & { similarity: number; filename: string })[]; notice: string }>('/search', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ candidate_id: id, threshold }),
   }),
   deleteClip: (id: string) => request(`/clips/${id}`, { method: 'DELETE' }),
   integrity: (id: string) => request<{ verified: boolean; sourceMatches: boolean; analysisMatches: boolean; sourceSha256: string; analysisSha256: string; normalized: boolean; checkedAt: string; notice: string }>(`/clips/${id}/integrity`),

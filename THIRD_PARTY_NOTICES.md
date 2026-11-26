@@ -8,6 +8,10 @@
 
 `face_detection_yunet_2023mar.onnx` is distributed under the MIT license. See the [upstream YuNet model license](https://github.com/opencv/opencv_zoo/blob/main/models/face_detection_yunet/LICENSE).
 
+## SFace — face embedding model
+
+`face_recognition_sface_2021dec.onnx` is distributed under the Apache License 2.0 via OpenCV Zoo. See the [upstream SFace model directory](https://github.com/opencv/opencv_zoo/tree/main/models/face_recognition_sface).
+
 ## OpenCV
 
 OpenCV is used for video decode, image processing, and ONNX inference. See the [OpenCV license](https://github.com/opencv/opencv/blob/4.x/LICENSE).
