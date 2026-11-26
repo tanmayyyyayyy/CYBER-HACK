@@ -1,80 +1,184 @@
-# Drishti — ATM Forensic Video Review
+# Drishti — ATM CCTV Forensic Video Review & Local Surveillance Console
 
-Drishti is a local-first ATM video evidence review product for PS04. It narrows a clip to a supplied transaction time, detects people and faces, ranks candidate frames using visible quality signals, and lets an investigator record a review or compare appearance candidates across other uploaded clips.
+**Drishti** is an air-gapped, local-first video analytics and forensic evidence review workstation built for **Rajasthan Police Cyber Security Hackathon 2026 — PS04 (ATM CCTV Suspect Face Extraction for Card & ATM Fraud Investigation)**.
 
-The interface is Rajasthan Police-inspired and is not an official Rajasthan Police system. It has no live bank CCTV connection. Four channel cards organize **uploaded recordings**; they are not live feeds. No real personal data, Aadhaar/criminal database, identity watchlist, external API, cloud database, or telemetry is used.
+It links ATM CCTV recordings (and proprietary DVR/NVR exports) to bank transaction timestamps or Electronic Journal (EJ) logs, detects and tracks people near the terminal keypad and cash slot, ranks the clearest candidate face frames with occlusion/quality flags, searches across clips using **SFace 128-D** face embeddings, monitors up to 4 local/IP-webcam feeds against a case watchlist in real time, and exports cryptographically signed evidence sheets.
 
-## Quick setup (macOS/Linux)
+> **PS04 Scope & Compliance Notice:** The interface is Rajasthan Police-inspired and is **not** an official Rajasthan Police system. All processing runs locally on `127.0.0.1` with zero external APIs, cloud databases, telemetry, Aadhaar lookups, or criminal database connections. Live bank CCTV connections are never established; similarity scores and watchlist alerts are strictly investigative decision-support aids requiring human verification.
 
-Requirements: Python 3.11+, Node.js 18+, and npm. FFmpeg is optional for videos OpenCV decodes directly; it is used for local conversion of compatible DVR/NVR exports.
+---
+
+## Key Capabilities
+
+### 1. Transaction-Time Forensic Analysis & Batch EJ Matcher
+- **Flexible Transaction Linking:** Enter a clip-relative timestamp (`HH:MM:SS`) or an absolute bank timestamp paired with the CCTV clip start time, plus a configurable search window (`±5 seconds` to `±5 minutes`), FIR/Case reference, and Bank Transaction Reference / RRN.
+- **ATM Electronic Journal (CSV) Matcher (`/api/journal/match`):** Upload a bank EJ CSV export to match transaction records against local clip wall-clock windows (with local timezone alignment) and queue disputed withdrawals directly for analysis.
+- **Channel Management (`ATM-01` – `ATM-04`):** Assign, replace, or delete footage per channel (`Entry view`, `Keypad view`, `Cash slot`, `Exit view`). Clicking **Load Demo Case** loads 2 pilot ATM feeds (`ATM-01` & `ATM-02`) while leaving `ATM-03` & `ATM-04` open for live uploads.
+
+### 2. Multi-Format & DVR/NVR Forensics
+- **Supported Formats:** `MP4`, `AVI`, `MOV`, `MKV`, `WMV`, `FLV`, `MPEG`/`MPG`, plus compatible DVR/NVR exports (`H264`, `264`, `DAV`, `ASF`, `TS`, `M4V`, `VOB`).
+- **Safe Normalization & Container Checks ([`backend/forensics.py`](backend/forensics.py)):** Probes streams via `ffprobe`, normalizes non-standard containers with local FFmpeg restricted via `-protocol_whitelist file,pipe`, inspects container metadata, and runs frame-continuity / luminance splice checks (`/api/dvr-guidance` reports conversion tips for unsupported proprietary formats).
+
+### 3. Person Tracking, YuNet Face Extraction & SFace 128-D Embeddings
+- **Lightweight Person-Only Tracking ([`backend/analysis.py`](backend/analysis.py)):** Runs local OpenCV Zoo **MediaPipe** person detection (`person_detection_mediapipe_2023mar.onnx`, with HOG fallback) and IoU track association under thread-safe inference locks (`_person_infer_lock`). Car, ANPR, and border-detection pipelines are intentionally omitted.
+- **Face Detection & Quality Ranking:** Samples frames at `0.75s` intervals (up to `1,600` frames) inside the transaction window using **YuNet** (`face_detection_yunet_2023mar.onnx`), padding tight ROIs and scoring sharpness, illumination, face size, pose angle, and keypad/slot proximity.
+- **Reliability & Behaviour Flags:** Flags `possible mask`, `possible cap / headgear`, `possible helmet`, `partial face`, `soft focus`, `low light`, `overexposed`, `turned face`, `small face`, `low resolution`, and `low face confidence`, alongside advisory **shoulder-surfing** (multi-person zone occupancy) and **card-slot skimming / tampering** cues.
+- **True Deep Face Embeddings (`/api/search`):** Uses **SFace** (`face_recognition_sface_2021dec.onnx`) 128-D embeddings (`_sface_infer_lock`) for cross-clip cosine similarity search across clips in the local vault.
+
+### 4. Inspection, Enhancement & Privacy Redaction (`Evidence review`)
+- **Forensic Light Studio:** Live **Brightness** (`60–200%`) and **Contrast** (`60–220%`) inspection sliders directly in the evidence viewer.
+- **Labelled Enhancement (`/api/candidates/{id}/enhanced`):** Toggle between **Original Raw** and deterministic **Enhanced (2× Lanczos4 + CLAHE + bilateral + unsharp)** — non-generative and visibly watermarked as an enhanced review aid.
+- **Bystander Privacy Redaction (`/api/candidates/{id}/frame-redacted`):** Generates a **Privacy Frame** preview that Gaussian-blurs bystanders outside the target suspect while preserving the selected candidate and stamping SHA-256 provenance.
+- **Human Review & Exports:** Mark candidates for review or exclusion with investigator notes, export a **Sealed PDF Evidence Sheet** (`/api/evidence/{id}.pdf`), and download an **HMAC-SHA256 Signed Manifest** (`/api/evidence/{id}/manifest.json`).
+
+### 5. 4-Stream Surveillance Wall & Live SFace Watchlist ([`backend/streams.py`](backend/streams.py))
+- **Unified Control-Room View (`Surveillance wall`):** Displays 4 camera slots (`CAM-01` – `CAM-04`) side-by-side with **Live face captures**, **Live suspicious alerts**, and **Live detection log** on the same screen.
+- **2 Default Feeds + 2 Open Slots:** Starts `CAM-01` and `CAM-02` on local pilot clips while leaving `CAM-03` and `CAM-04` ready for custom sources.
+- **Add / Change / Delete & IP Webcam Support:** Attach local video clips, Android **IP Webcam** URLs (`http://<phone-ip>:8080/video`), local `rtsp://...` feeds, or Mac/USB camera indices (`0`–`4`) to any slot, and run **Capture to Case** straight from a `120`-frame rolling buffer.
+- **Raw-Frame Inference & Live Case Watchlist (`/api/watchlist`):** Runs MediaPipe + YuNet + SFace matching on **raw unannotated frames** before drawing HUD overlays to prevent false badge/text crops. Arm any extracted suspect face from **Evidence review** onto the local **Live Case Watchlist** to trigger real-time alerts if a matching SFace 128-D face appears across any of the 4 live feeds or connected IP Webcams.
+
+### 6. Case Intel & Multi-Camera Suspect Journey (`/api/cases/journey`)
+- Reconstructs cross-camera suspect appearances across uploaded clips (`ATM-01 → ATM-02`, filtering out same-camera self-links), summarizes watchlist hits, and displays an audit/chain-of-custody readiness brief.
+
+---
+
+## Navigation Tabs (UI Workspace)
+
+The sticky top navigation bar exposes 9 role-aware workspace tabs (`App.tsx`):
+
+| Tab | Role | Purpose |
+| :--- | :--- | :--- |
+| **Surveillance wall** | All | 4-camera live person/face/watchlist monitor, IP Webcam connector, rolling-buffer capture, live alerts & detection log |
+| **Case desk** | All | 4 ATM channel slots (`ATM-01`–`04` add/change/delete), transaction linking, EJ CSV batch matcher, demo loader, & **Evidence review** |
+| **Case intel** | All | Multi-camera suspect journey graph, armed SFace watchlist cards, & courtroom readiness summary |
+| **Video library** | All | Multi-format ingestion, FFmpeg normalization, codec/continuity forensics, & per-clip SHA-256 verification |
+| **Face search** | All | SFace 128-D embedding cosine similarity search across all local clips |
+| **Reports** | All | Forensic throughput, quality/occlusion metrics, and 4-stream telemetry |
+| **Audit** | All | Tamper-evident hash-chained operator actions, alert clearing, & CSV / signed JSON audit export (`/api/audit/export`) |
+| **Access** | Admin | Local investigator registration approval, role inspection, and account enable/disable |
+| **Security** | Admin | SQLite integrity checks, full SHA-256 vault sweep, AES-256-GCM DB snapshot backup/download, & **Manifest Seal Verifier** |
+
+---
+
+## Cyber Security & Chain-of-Custody Controls ([`backend/security.py`](backend/security.py), [`backend/auth.py`](backend/auth.py), [`backend/store.py`](backend/store.py))
+
+- **Authentication & RBAC:** First user created in the sign-up portal becomes `administrator`; subsequent sign-ups remain pending until approved in **Access**. Passphrases use salted `scrypt` hashes; sessions use 8-hour `HttpOnly; SameSite=Strict` cookies with CSRF token verification on state-changing requests.
+- **Brute-Force Protection:** Failed sign-ins are rate-limited using one-way hashed identifiers (no plaintext emails stored in throttle tables or denial events).
+- **HTTP & CSP Hardening:** Strict Content Security Policy, `X-Frame-Options` / `frame-ancestors 'none'`, `X-Content-Type-Options: nosniff`, `Cross-Origin-Resource-Policy: same-origin`, `Permissions-Policy` disabling browser camera/microphone/geolocation APIs, and `Cache-Control: no-store` on API responses.
+- **Cryptographic Integrity:**
+  - Dual SHA-256 fingerprints (`original` upload bytes + `normalized` review bytes) checked on demand and via full-vault sweeps (`/api/security/evidence-check`).
+  - Hash-chained SQLite audit ledger verifiable at `/api/audit/integrity`.
+  - **HMAC-SHA256 Signed Manifests** (`signing.key` stored mode `0600` in data dir) verifiable anytime via `/api/security/verify-manifest` inside **Security**.
+- **Encrypted Metadata Backups & Restore:** Downloads an in-memory SQLite online backup encrypted with **AES-256-GCM** using an operator passphrase (never stored). Restore while the service is stopped:
+  ```bash
+  python scripts/restore_database.py /path/to/drishti-db-....enc
+  ```
+- **Local Storage Hardening:** Data directory (`backend/data/`, overridable with `DRISHTI_DATA_DIR`) is created with mode `0700`, SQLite files with mode `0600`, and `PRAGMA secure_delete = ON`. Use full-disk encryption (FileVault / LUKS / BitLocker) for host volume protection.
+
+---
+
+## Quick Setup & Run (macOS / Linux)
+
+**Prerequisites:** Python 3.11+, Node.js 18+ (`npm`), and local `ffmpeg` / `ffprobe` (recommended for DVR/NVR containers and codec probing).
 
 ```bash
 ./setup.sh
 ./start.sh
 ```
 
-Open `http://127.0.0.1:5174`. The API docs are at `http://127.0.0.1:8000/api/docs`.
+What `./setup.sh` runs automatically:
+1. Creates `.venv` and installs Python dependencies from `requirements.txt`.
+2. Installs Node packages via `npm install`.
+3. Downloads pinned OpenCV Zoo ONNX models via `scripts/download_models.py` with strict SHA-256 verification.
+4. Generates/prepares the 4 coherent local pilot feeds in `demo_feeds/` via `scripts/prepare_demo_feeds.py`.
 
-On first launch, create the administrator account in the sign-up portal. The first account is administrator; later sign-ups stay pending until an administrator approves them under **Access control**. Passphrases are stored as salted scrypt hashes. Sessions use an HTTP-only, same-site cookie, expire after eight hours, and require a CSRF token for writes. Accounts and sessions are local to the configured data directory. Password recovery is not configured, so protect the administrator passphrase and back up the data directory securely.
+What `./start.sh` runs:
+- Executes `scripts/doctor.py` to verify dependencies and model checksums.
+- Launches `scripts/run_local.py`:
+  - **Frontend UI:** `http://127.0.0.1:5174`
+  - **Backend API & OpenAPI Docs:** `http://127.0.0.1:8000/api/docs`
 
-Setup fetches the OpenCV Zoo MediaPipe person detector and YuNet face detector into the ignored `models/` directory. The downloader pins upstream revisions and verifies SHA-256 before use. The app makes no model or cloud requests at runtime. If the person model is unavailable, OpenCV HOG is used as a lower-accuracy fallback; YuNet is required for face candidates. See [LICENSES.md](LICENSES.md) and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
-
-To build one local-serving bundle: `npm run build`, then `.venv/bin/python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000`; FastAPI serves `dist/` when present. Keep the host bound to loopback for a single-workstation install.
-
-## Workflow
-
-1. Upload a supported MP4, AVI, MOV, MKV, WMV, FLV, MPEG, or MPG file to one of four local ATM view channels.
-2. Enter either a clip-relative `HH:MM:SS` transaction time, or an absolute bank transaction time plus the CCTV clip start timestamp.
-3. Choose the time window (±5 seconds to ±5 minutes) and run the local analysis.
-4. Review candidate crops, quality components, reliability flags, track/time context, and the source clip. Mark a candidate for review or exclude it, add a note, search other uploaded clips for visual similarity, and export a PDF evidence sheet with source/analysis SHA-256 fingerprints.
-5. Review reports and the local audit trail. Removing a clip removes its analyses and extracted crops.
-
-All persistent records and uploads are stored under `backend/data/`. Override the location with `DRISHTI_DATA_DIR`.
-
-The video library can recompute both file fingerprints to alert if local evidence bytes changed after ingest. A hash match detects byte changes; it does not prove who recorded or supplied the original footage.
-
-## Security controls
-
-- **Security Center (administrator only):** SQLite `quick_check`, foreign-key validation, audit-chain verification, local file-mode checks, pending-account/failed-sign-in signals, and host/network boundary reminders.
-- **Browser/API hardening:** Content Security Policy, anti-framing and MIME-sniff headers, privacy/referrer policy, same-origin resource policy, disabled camera/microphone/location APIs, and no-store on API responses.
-- **Evidence integrity sweep:** rehashes the original and analysis copy for each stored clip, records the sweep in the audit chain, and raises a warning event for mismatches.
-- **Encrypted database snapshots:** SQLite's online backup API creates a consistent metadata snapshot in memory; the app encrypts it with AES-256-GCM and a passphrase-derived key. The passphrase is not stored. The snapshot excludes uploaded videos and candidate crops; protect those with a separate encrypted filesystem backup.
-- **Restore command:** stop the app, then run `python scripts/restore_database.py /path/to/drishti-db-....enc`. It validates the passphrase, GCM authentication, SQLite integrity and foreign keys, and preserves the prior database before replacing it. Restore the matching media directories separately.
-- The application hardens its local data directory to mode `0700`, the SQLite file to `0600`, and enables SQLite `secure_delete`. These OS permissions are defense-in-depth for a single-user local machine, not database encryption. Enable FileVault/BitLocker/LUKS for the host volume; the Security Center marks this as an operator check.
-- Failed sign-ins are rate-limited; throttle records keep a one-way identifier hash rather than the submitted email. Authentication denials enter the audit chain without passwords or raw email addresses.
-
-## Detection and reliability
-
-- Person detection uses the local OpenCV Zoo MediaPipe ONNX detector and a lightweight IoU association to keep track IDs between sampled frames.
-- Face detection uses OpenCV Zoo YuNet. Frames in the configured transaction window are sampled at 0.75-second intervals, with a 1,600-frame cap.
-- Quality is a ranking aid built from sharpness, illumination, face size, face angle estimate, and detector confidence. Flags include soft focus, low light/overexposure, turned face, and small face.
-- Cross-clip search uses normalized grayscale histograms as a lightweight baseline. It is **appearance similarity only**, not face recognition or identity verification; expect false matches and missed matches.
-- No mask/helmet classifier or ATM interaction/action classifier is included. “Person at keypad/cash slot” is an investigator decision aided by the clip timeline; the product does not claim to infer transaction intent.
-- Output quality depends on clip resolution, lighting, angle, codec, and the supplied timestamp. A human must verify the original footage and transaction record.
-- Local audit entries are hash-linked and verifiable at `/api/audit/integrity`. This is tamper-evident against record edits or broken links; it is not immutable against a privileged rewrite of the local database. Operational deployments need signed, externally retained checkpoints and access controls.
-
-## Integration and deployment boundary
-
-- REST API and OpenAPI contract: `http://127.0.0.1:8000/api/docs`.
-- Four channels are identifiers for uploaded file evidence, not camera adapters. For a bank deployment, add an approved DVR export connector or evidence-management adapter; do not enable a live feed without formal authorization.
-- The portal provides local administrator/investigator roles, approval, account disable, session expiry, and CSRF protection. It does not provide enterprise SSO/MFA, password recovery, multi-workstation operation, or deployment-grade identity lifecycle management. Keep the server bound to loopback. Before a Cyber Security Cell pilot, integrate approved SSO/MFA and managed RBAC, add an evidence-storage policy, signed external audit checkpoints, tested backup/restore, and a security review.
-- Active SQLite records and evidence files are not application-encrypted at rest. Use encrypted host storage. The encrypted export protects a database snapshot in transit/portable storage only; loss of its passphrase makes it unrecoverable.
-- The API's file storage and SQLite database are under `backend/data/`; set `DRISHTI_DATA_DIR` to an access-controlled volume for a pilot. Back up the whole directory consistently while the service is stopped.
-- Product integration points and security-cell rollout checklist: [docs/INTEGRATION_NOTES.md](docs/INTEGRATION_NOTES.md) and [docs/PRODUCTIZATION.md](docs/PRODUCTIZATION.md).
-
-## Tests
-
+**Single-Bundle Production Serving:**
 ```bash
-python scripts/smoke_test.py
 npm run build
-python scripts/doctor.py
+.venv/bin/python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000
+```
+When `dist/` is present, FastAPI serves the built SPA directly on loopback (`127.0.0.1:8000`).
+
+---
+
+## Local AI Models (Pinned & Checksummed)
+
+[`scripts/download_models.py`](scripts/download_models.py) downloads and verifies these OpenCV Zoo weights into the git-ignored `models/` folder (no runtime downloads ever occur):
+
+| Model | Purpose | SHA-256 |
+| :--- | :--- | :--- |
+| `person_detection_mediapipe_2023mar.onnx` | Local person detection & tracking | `47fd5599d6fa17608f03e0eb0ae230baa6e597d7e8a2c8199fe00abea55a701f` |
+| `face_detection_yunet_2023mar.onnx` | Face & 5-point landmark detection | `8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4` |
+| `face_recognition_sface_2021dec.onnx` | SFace 128-D cross-clip & watchlist embeddings | `0ba9fbfa01b5270c96627c4ef784da859931e02f04419c829e83484087c34e79` |
+
+See [LICENSES.md](LICENSES.md) and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
+---
+
+## Project Layout
+
+```text
+CYBER-HACK/
+├── backend/
+│   ├── main.py          # FastAPI routes, RBAC/CSRF middleware, journal matcher, evidence PDF/manifest exports
+│   ├── analysis.py      # MediaPipe person tracking, YuNet faces, SFace 128-D embeddings, quality/occlusion flags
+│   ├── forensics.py     # ffprobe metadata, FFmpeg DVR normalization, splice detection, CLAHE enhancement, privacy blur
+│   ├── streams.py       # 4-stream local/IP-Webcam/RTSP manager, raw-frame watchlist matching, rolling 120-frame buffer
+│   ├── store.py         # SQLite persistence, schema migrations, hash-chained audit ledger, watchlist & journey data
+│   ├── security.py      # Path containment, security headers, AES-256-GCM backups, HMAC-SHA256 manifest signing/verify
+│   └── auth.py          # scrypt password hashing, session cookies, CSRF tokens, login throttling
+├── src/
+│   ├── App.tsx          # React SPA (9 workspace tabs, Portaled Privacy Frame modal, Light studio, Slot Source modals)
+│   ├── api.ts           # Typed API client & CSRF request helpers
+│   └── styles.css       # Rajasthan Police-inspired light command theme & responsive breakpoints
+├── scripts/
+│   ├── doctor.py            # Environment & SHA-256 model integrity check
+│   ├── download_models.py   # Pinned ONNX model downloader
+│   ├── prepare_demo_feeds.py# Generates demo_feeds/ pilot CCTV MP4s
+│   ├── run_local.py         # Launches Uvicorn (8000) + Vite (5174) locally
+│   ├── smoke_test.py        # End-to-end automated verification across API, RBAC, FFmpeg, SFace, streams & manifests
+│   ├── restore_database.py  # Encrypted AES-256-GCM SQLite snapshot restore CLI
+│   └── run_ui_test_server.py# Local static/dev test harness
+├── demo_feeds/          # 4 compact local pilot feeds (cam_01_vestibule.mp4 .. cam_04_exit.mp4)
+└── docs/                # Pitch guide, architecture/integration notes, productization & UI test report
 ```
 
-The smoke test creates only temporary synthetic video, exercises account bootstrap/approval/login/RBAC/CSRF plus the local API, then removes its temporary workspace. It checks database health, evidence rehashing, encrypted snapshot and wrong-passphrase rejection, upload/validation, metadata, timestamp analysis, four slots, review/search, hash-chain tampering, reports, PDF export, and deletion. It does not measure detection accuracy on ATM footage. A manual browser UI verification report is in [docs/UI_TEST_REPORT.md](docs/UI_TEST_REPORT.md).
+---
 
-## Repository references
+## Verification & Tests
 
-- `../sih-2026-raw`: YOLO person detection, tracking, local video ingestion, React dashboard and FastAPI API patterns. Border-event, ANPR, face registry, Supabase and cloud transmission paths were left out of this product.
-- `../gods-eye-view`: public CCTV source/catalog/provider architecture. Its city-camera catalog and external proxy streams are not ATM evidence and are not connected here.
+Run the full verification suite:
 
-Use only the hackathon sample dataset or synthetic clips for demos. Get explicit permission before using any other footage.
+```bash
+python3 scripts/doctor.py
+npm run build
+python3 -m compileall -q backend scripts
+python3 scripts/smoke_test.py
+```
+
+`scripts/smoke_test.py` spins up an isolated temporary data directory and synthetic clips to verify:
+- Bootstrap admin signup, investigator approval, login throttling, RBAC enforcement, and CSRF protection
+- Multi-format upload, metadata extraction, DVR guidance, container validation, and SHA-256 integrity checks
+- Transaction timestamp linking, batch EJ CSV matching, 2-clip demo case loading, candidate extraction, SFace 128-D search, enhanced & privacy-redacted frame endpoints
+- 4-stream pilot start/stop, custom source attachment, rolling-buffer capture, live watchlist arming/deletion, and cross-camera suspect journey reconstruction
+- Audit hash-chain integrity & tamper detection, reports, sealed PDF evidence export, HMAC-SHA256 manifest generation/verification, and AES-256-GCM backup/wrong-passphrase rejection
+
+---
+
+## Documentation & Reference Architecture
+
+- [Hackathon Pitch & 60-Second Demo Guide](docs/HACKATHON_PITCH_GUIDE.md)
+- [Product Specification](PRODUCT.md) & [UI/UX Design Guide](DESIGN.md)
+- [Integration Notes](docs/INTEGRATION_NOTES.md) & [Security Cell Productization Checklist](docs/PRODUCTIZATION.md)
+- [UI Verification Report](docs/UI_TEST_REPORT.md)
+- Reference repositories integrated conceptually (local-only, no cloud/external dependencies carried over):
+  - `../sih-2026-raw`: local person detection, tracking, and video ingestion patterns.
+  - `../gods-eye-view`: multi-stream camera wall and source catalog concepts adapted for 4 local ATM/IP-Webcam slots.
+
+> Use only hackathon-provided sample clips or synthetic footage unless explicit authorization is obtained.
