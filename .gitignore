@@ -1,0 +1,10 @@
+.venv/
+node_modules/
+dist/
+backend/data/
+models/*.pt
+models/*.onnx
+__pycache__/
+*.py[cod]
+.DS_Store
+.env

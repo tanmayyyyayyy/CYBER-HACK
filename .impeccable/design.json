@@ -1,0 +1,91 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-11-26T12:00:00+05:30",
+  "title": "Design System: Drishti ATM Forensic Review",
+  "extensions": {
+    "colorMeta": {
+      "navy-deep": { "role": "neutral", "displayName": "Deep Rail Navy", "tonalRamp": ["#081722", "#0c2236", "#122d45", "#1b3c58", "#385b75", "#668095", "#9aabb7", "#d1d9de"] },
+      "navy": { "role": "primary", "displayName": "Control Navy", "tonalRamp": ["#0c2236", "#112b43", "#173954", "#204b6c", "#456b87", "#7892a6", "#b0bfca", "#e3e9ed"] },
+      "navy-raised": { "role": "primary", "displayName": "Raised Navy", "tonalRamp": ["#102b40", "#1b3c58", "#294e6b", "#416783", "#66859c", "#92a9b8", "#bdcbd3", "#e2e8ec"] },
+      "sand": { "role": "neutral", "displayName": "Warm Sand", "tonalRamp": ["#24231f", "#3c3b35", "#57564f", "#76756e", "#96958f", "#b6b5b0", "#d5d4d0", "#f1f0eb"] },
+      "paper": { "role": "neutral", "displayName": "Evidence Paper", "tonalRamp": ["#292929", "#444444", "#606060", "#7c7c7c", "#999999", "#b6b6b6", "#d4d4d4", "#ffffff"] },
+      "ink": { "role": "neutral", "displayName": "Record Ink", "tonalRamp": ["#101920", "#1d2d3b", "#314657", "#4d6272", "#70818d", "#98a4ad", "#c0c8cd", "#e3e7e9"] },
+      "ink-soft": { "role": "neutral", "displayName": "Supporting Ink", "tonalRamp": ["#26333d", "#536575", "#687c8b", "#82929d", "#9fabb3", "#bac3c9", "#d5dade", "#edf0f2"] },
+      "line": { "role": "neutral", "displayName": "Divider Gray", "tonalRamp": ["#252729", "#45484a", "#65696b", "#85898b", "#a5a8aa", "#c1c4c5", "#d4d7d8", "#dfe3e5"] },
+      "amber": { "role": "tertiary", "displayName": "Review Amber", "tonalRamp": ["#321b08", "#5b350f", "#85551c", "#bd7d2d", "#ce9855", "#ddb47f", "#ead0ad", "#f6ecd9"] },
+      "amber-soft": { "role": "tertiary", "displayName": "Amber Wash", "tonalRamp": ["#382716", "#634a2c", "#8d7049", "#b7986e", "#c9ae8a", "#d9c4a6", "#e8d9c4", "#f6ecd9"] },
+      "teal": { "role": "secondary", "displayName": "Verification Teal", "tonalRamp": ["#062c29", "#0b4842", "#12645c", "#197b72", "#47958d", "#78b0aa", "#acd0cb", "#e0f2ee"] },
+      "teal-soft": { "role": "secondary", "displayName": "Teal Wash", "tonalRamp": ["#133a35", "#315c56", "#507d77", "#719e98", "#92b6b1", "#b0cbc7", "#c9dfdc", "#e0f2ee"] },
+      "red": { "role": "tertiary", "displayName": "Attention Red", "tonalRamp": ["#381311", "#641f1a", "#8a332c", "#b64e45", "#c5746d", "#d59a94", "#e7c2be", "#f9e9e6"] },
+      "red-soft": { "role": "tertiary", "displayName": "Red Wash", "tonalRamp": ["#3d2421", "#69413d", "#95645f", "#b88681", "#cca19d", "#ddbbb8", "#edd5d2", "#f9e9e6"] }
+    },
+    "typographyMeta": {
+      "body": { "displayName": "Body", "purpose": "Readable interface text and explanations." },
+      "title": { "displayName": "Workspace Title", "purpose": "Primary page heading." },
+      "label": { "displayName": "Operational Label", "purpose": "Compact status and section labels." },
+      "record": { "displayName": "Machine Record", "purpose": "Hashes, event identifiers, and timestamp-like machine values." }
+    },
+    "shadows": [
+      { "name": "panel-lift", "value": "0 8px 22px rgba(16, 37, 54, .06)", "purpose": "Softly separate evidence and summary panels from the canvas." },
+      { "name": "overlay-lift", "value": "0 12px 30px rgba(16,38,56,.16)", "purpose": "Keep transient toast feedback legible above content." }
+    ],
+    "motion": [
+      { "name": "state-transition", "value": "160ms ease", "purpose": "Button, navigation, and control state changes." },
+      { "name": "page-entry", "value": "350ms cubic-bezier(.2,.75,.25,1)", "purpose": "Subtle transition into a workspace view." }
+    ],
+    "breakpoints": [
+      { "name": "compact", "value": "900px" },
+      { "name": "mobile", "value": "640px" }
+    ]
+  },
+  "components": [
+    {
+      "name": "Primary Button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "Confident action for the main workflow.",
+      "html": "<button class=\"ds-button\">Run analysis</button>",
+      "css": ".ds-button { min-height: 36px; padding: 0 12px; border: 1px solid #173954; border-radius: 5px; color: #fff; background: #173954; font: 600 11px/1.2 'IBM Plex Sans', sans-serif; cursor: pointer; transition: background 160ms ease, transform 160ms ease; } .ds-button:hover { background: #204b6c; } .ds-button:focus-visible { outline: 3px solid #d59a45; outline-offset: 2px; } .ds-button:active { transform: translateY(1px); }"
+    },
+    {
+      "name": "Evidence Input",
+      "kind": "input",
+      "description": "Compact field for times and case references.",
+      "html": "<input class=\"ds-input\" aria-label=\"Transaction time\" placeholder=\"HH:MM:SS\" />",
+      "css": ".ds-input { min-height: 36px; width: 220px; padding: 0 10px; border: 1px solid #cbd3d9; border-radius: 5px; color: #1d2d3b; background: #fff; font: 400 12px/1.4 'IBM Plex Sans', sans-serif; } .ds-input:focus { border-color: #bd7d2d; outline: 3px solid #d59a45; outline-offset: 2px; } .ds-input::placeholder { color: #72818d; opacity: 1; }"
+    },
+    {
+      "name": "Navigation Item",
+      "kind": "nav",
+      "description": "Rail link with a clear active marker.",
+      "html": "<button class=\"ds-nav\">Evidence review</button>",
+      "css": ".ds-nav { min-height: 42px; width: 220px; padding: 0 11px; border: 1px solid transparent; border-radius: 6px; color: #c3ced7; background: #0c2236; text-align: left; font: 500 12px/1.2 'IBM Plex Sans', sans-serif; cursor: pointer; } .ds-nav:hover, .ds-nav:focus-visible { color: #fff; background: #1b3c58; } .ds-nav:focus-visible { outline: 2px solid #d59a45; outline-offset: 2px; }"
+    },
+    {
+      "name": "Evidence Card",
+      "kind": "card",
+      "description": "Quiet container for a reviewed candidate or record.",
+      "html": "<article class=\"ds-card\"><strong>Candidate frame</strong><p>00:01:24 · quality 82</p></article>",
+      "css": ".ds-card { width: 260px; padding: 14px; border: 1px solid #dfe3e5; border-radius: 7px; color: #1d2d3b; background: #fff; box-shadow: 0 8px 22px rgba(16, 37, 54, .06); font: 400 12px/1.45 'IBM Plex Sans', sans-serif; } .ds-card strong { font-weight: 600; } .ds-card p { margin: 6px 0 0; color: #536575; font-size: 10px; font-variant-numeric: tabular-nums; }"
+    },
+    {
+      "name": "Local Status Chip",
+      "kind": "chip",
+      "description": "Semantic local-ready state indicator.",
+      "html": "<span class=\"ds-chip\"><i></i>LOCAL READY</span>",
+      "css": ".ds-chip { display: inline-flex; align-items: center; gap: 6px; min-height: 26px; padding: 0 9px; border: 1px solid #d2e3dd; border-radius: 4px; color: #26705e; background: #eef7f3; font: 700 8px/1 'IBM Plex Sans', sans-serif; letter-spacing: .08em; } .ds-chip i { width: 6px; height: 6px; border-radius: 50%; background: #197b72; }"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Evidence Room",
+    "overview": "The interface takes its cues from a focused investigation desk: restrained institutional navy, warm paper surfaces, measured amber emphasis, and compact metadata that keeps timestamps and provenance close to the evidence. The Rajasthan Police inspiration is expressed through a professional control-room tone; this is a prototype and does not represent an official system.\n\nThe dashboard is information-dense but keeps each action legible. Candidate frames and clip details remain the center of attention, while status colors carry clear meaning. Synthetic evidence and local-only processing are labeled directly in the product.",
+    "keyCharacteristics": ["Calm, operational hierarchy with compact, scannable labels.", "Warm paper and sand surfaces against a deep navy rail.", "Human-reviewed evidence, provenance, and confidence qualifiers stay visible."],
+    "rules": [
+      { "name": "The Meaningful Status Rule", "body": "Amber, teal, and red communicate a review state; do not use them as decoration.", "section": "colors" },
+      { "name": "The Provenance Readability Rule", "body": "Hashes and event identifiers use monospace with tabular numerals; explanatory copy stays in the body face.", "section": "typography" },
+      { "name": "The Quiet Surface Rule", "body": "Keep resting panels flat and calm; reserve stronger depth for a surfaced interaction.", "section": "elevation" }
+    ],
+    "dos": ["Do keep event time, camera/channel, and source provenance beside evidence.", "Do use status colors consistently and pair warnings with text.", "Do preserve the current compact, readable control-room hierarchy.", "Do keep synthetic/sample labels visible in the interface."],
+    "donts": ["Don't imply official Rajasthan Police endorsement or use unprovided government insignia.", "Don't present visual similarity or a detector result as a confirmed identity.", "Don't style recorded uploaded clips as live bank CCTV.", "Don't use amber, teal, or red for decoration."]
+  }
+}
