@@ -1,7 +1,7 @@
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertCircle, ArrowRight, BadgeCheck, Bell, Check, CheckCircle2, Clock3,
-  Database, Eye, Fingerprint, LoaderCircle, LockKeyhole, LogOut, Plus, Radio, RefreshCw,
+  Database, Eye, LoaderCircle, LockKeyhole, LogOut, Plus, Radio, RefreshCw,
   ShieldAlert, ShieldCheck, SlidersHorizontal, Sparkles, UsersRound, X,
 } from 'lucide-react';
 import {
@@ -81,7 +81,6 @@ export default function SecurityPortal() {
   return (
     <PortalWorkspace
       user={user}
-      onUserUpdate={setUser}
       onSignOut={async () => {
         try {
           await portalApi.logout();
@@ -169,9 +168,8 @@ function PortalAuthScreen({ onAuthenticated, onToast, toast }: {
   );
 }
 
-function PortalWorkspace({ user, onUserUpdate, onSignOut, toast, onToast }: {
+function PortalWorkspace({ user, onSignOut, toast, onToast }: {
   user: PortalUser;
-  onUserUpdate: (u: PortalUser) => void;
   onSignOut: () => Promise<void>;
   toast: PortalToast;
   onToast: (t: PortalToast) => void;
@@ -184,10 +182,6 @@ function PortalWorkspace({ user, onUserUpdate, onSignOut, toast, onToast }: {
   const [rules, setRules] = useState<SecurityRule[]>([]);
   const [sirenMuted, setSirenMuted] = useState(false);
   const [nowMs, setNowMs] = useState(Date.now());
-  const [aadhaarModalUser, setAadhaarModalUser] = useState<PortalUser | null>(null);
-  const [aadhaarInput, setAadhaarInput] = useState('4821');
-  const [ekycChallenge, setEkycChallenge] = useState<{ id: string; masked: string; hint: string } | null>(null);
-  const [ekycOtp, setEkycOtp] = useState('');
   const [newGuardOpen, setNewGuardOpen] = useState(false);
   const lastSirenAlertRef = useRef<string>('');
   const pollBusyRef = useRef(false);
@@ -473,7 +467,7 @@ function PortalWorkspace({ user, onUserUpdate, onSignOut, toast, onToast }: {
                         <span>{g.employeeId} · {ROLE_LABELS[g.role]}</span>
                       </div>
                       <span className={`account-status account-${g.verificationStatus === 'verified' ? 'active' : 'pending'}`}>
-                        {g.aadhaarVerified ? 'Aadhaar Sandbox Verified' : g.verificationStatus}
+                        {g.verificationStatus}
                       </span>
                     </div>
 
@@ -483,16 +477,10 @@ function PortalWorkspace({ user, onUserUpdate, onSignOut, toast, onToast }: {
                       <div><small>Assigned ATMs</small><span>{g.assignedAtms.join(', ') || 'None'}</span></div>
                       <div><small>Emergency Contact</small><span>{g.emergencyContact || '—'}</span></div>
                       <div><small>Address &amp; PIN</small><span>{g.address || '—'} ({g.pinCode || '—'})</span></div>
-                      <div><small>Aadhaar Status</small><span>{g.aadhaarVerified ? `Verified (${g.aadhaarMasked})` : 'Unverified'}</span></div>
+                      <div><small>Identity check</small><span>{g.verificationStatus === 'verified' ? 'Marked verified by portal administrator' : 'Not verified'}</span></div>
                     </div>
 
                     <div className="stream-actions-row">
-                      <button
-                        className="button button-outline button-compact"
-                        onClick={() => { setAadhaarModalUser(g); setEkycChallenge(null); setEkycOtp(''); }}
-                      >
-                        <Fingerprint size={14} /> {g.aadhaarVerified ? 'Re-Verify Aadhaar OTP' : 'Verify Aadhaar OTP'}
-                      </button>
                       {canManage && g.verificationStatus !== 'verified' && (
                         <button
                           className="button button-primary button-compact"
@@ -566,65 +554,6 @@ function PortalWorkspace({ user, onUserUpdate, onSignOut, toast, onToast }: {
           )}
         </div>
       </main>
-
-      {aadhaarModalUser && (
-        <div className="privacy-modal-backdrop" role="dialog" aria-modal="true" onClick={() => setAadhaarModalUser(null)}>
-          <div className="privacy-modal slot-modal" onClick={(e) => e.stopPropagation()}>
-            <div className="section-title">
-              <div>
-                <h2>Aadhaar-Based OTP Verification (Sandbox)</h2>
-                <p>For {aadhaarModalUser.displayName} ({aadhaarModalUser.employeeId}). Only masked last-4 + HMAC token is retained.</p>
-              </div>
-              <button className="icon-button" onClick={() => setAadhaarModalUser(null)}><X size={18} /></button>
-            </div>
-            <div className="intake-form">
-              <label className="field-group" htmlFor="ekyc-aadhaar-input">
-                <span className="field-label">Last 4 Digits (or 12-digit Test ID — auto-masked)</span>
-                <input id="ekyc-aadhaar-input" name="aadhaar_input" value={aadhaarInput} onChange={(e) => setAadhaarInput(e.target.value)} maxLength={14} />
-              </label>
-              <button
-                type="button"
-                className="button button-outline button-compact"
-                onClick={async () => {
-                  try {
-                    const res = await portalApi.requestAadhaarOtp(aadhaarModalUser.id, aadhaarInput);
-                    setEkycChallenge({ id: res.challengeId, masked: res.aadhaarMasked, hint: res.demoOtpHint });
-                    setEkycOtp(res.demoOtpHint);
-                    onToast({ kind: 'success', message: `Sandbox eKYC OTP issued (${res.demoOtpHint})` });
-                  } catch (e) {
-                    onToast({ kind: 'error', message: e instanceof Error ? e.message : 'OTP failed.' });
-                  }
-                }}
-              >
-                <Sparkles size={14} /> Request eKYC Sandbox OTP
-              </button>
-              {ekycChallenge && (
-                <>
-                  <div className="auth-notice"><CheckCircle2 size={15} /> Masked: {ekycChallenge.masked} · Demo OTP: <strong>{ekycChallenge.hint}</strong></div>
-                  <label className="field-group" htmlFor="ekyc-otp-input"><span className="field-label">Enter OTP</span><input id="ekyc-otp-input" name="ekyc_otp" autoComplete="one-time-code" value={ekycOtp} onChange={(e) => setEkycOtp(e.target.value)} /></label>
-                  <button
-                    type="button"
-                    className="button button-primary"
-                    onClick={async () => {
-                      try {
-                        const updated = await portalApi.verifyAadhaarOtp(aadhaarModalUser.id, ekycChallenge.id, ekycOtp);
-                        if (updated.id === user.id) onUserUpdate(updated);
-                        setAadhaarModalUser(null);
-                        onToast({ kind: 'success', message: `${updated.displayName} eKYC verified (${updated.aadhaarMasked})` });
-                        await loadAll();
-                      } catch (e) {
-                        onToast({ kind: 'error', message: e instanceof Error ? e.message : 'Verification failed.' });
-                      }
-                    }}
-                  >
-                    <BadgeCheck size={15} /> Complete Verification
-                  </button>
-                </>
-              )}
-            </div>
-          </div>
-        </div>
-      )}
 
       {newGuardOpen && (
         <NewGuardModal

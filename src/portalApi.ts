@@ -128,16 +128,6 @@ export const portalApi = {
     setPortalCsrf(r.csrfToken);
     return r;
   },
-  requestOtp: (identifier: string) => secRequest<{ challengeId: string; maskedMobile: string; demoOtpHint: string; notice: string }>('/auth/otp/request', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ identifier }),
-  }),
-  verifyOtp: async (challenge_id: string, otp: string) => {
-    const r = await secRequest<{ user: PortalUser; csrfToken: string }>('/auth/otp/verify', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ challenge_id, otp }),
-    });
-    setPortalCsrf(r.csrfToken);
-    return r;
-  },
   logout: async () => {
     await secRequest('/auth/logout', { method: 'POST' });
     setPortalCsrf('');
@@ -149,14 +139,6 @@ export const portalApi = {
   }) => secRequest<PortalUser>('/guards', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }),
   updateGuard: (id: string, payload: Record<string, unknown>) =>
     secRequest<PortalUser>(`/guards/${id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }),
-  requestAadhaarOtp: (userId: string, aadhaar_input: string) =>
-    secRequest<{ challengeId: string; aadhaarMasked: string; demoOtpHint: string; notice: string }>(`/guards/${userId}/aadhaar-otp/request`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ aadhaar_input }),
-    }),
-  verifyAadhaarOtp: (userId: string, challenge_id: string, otp: string) =>
-    secRequest<PortalUser>(`/guards/${userId}/aadhaar-otp/verify`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ challenge_id, otp }),
-    }),
   assignments: () => secRequest<AtmAssignment[]>('/assignments'),
   updateAssignment: (atmId: string, payload: Record<string, unknown>) =>
     secRequest<AtmAssignment>(`/assignments/${atmId}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }),

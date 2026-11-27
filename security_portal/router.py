@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import os
 import re
 import secrets
 import uuid
@@ -18,6 +19,7 @@ from backend import store as evidence_store
 
 PORTAL_COOKIE = "drishti_portal_session"
 SESSION_HOURS = 8
+DUMMY_PASSWORD_HASH = store.hash_secret(secrets.token_urlsafe(32))
 
 router = APIRouter(prefix="/sec-api", tags=["Security & Escalation Portal"])
 
@@ -99,7 +101,7 @@ def _issue_session(response: Response, user_row) -> dict[str, Any]:
         token,
         httponly=True,
         samesite="strict",
-        secure=False,
+        secure=os.environ.get("DRISHTI_COOKIE_SECURE") == "1",
         max_age=SESSION_HOURS * 3600,
         path="/",
     )
@@ -143,22 +145,13 @@ class PortalLoginRequest(BaseModel):
     password: str = Field(min_length=1, max_length=200)
 
 
-class OtpRequestPayload(BaseModel):
-    identifier: str = Field(min_length=2, max_length=120)
-
-
-class OtpVerifyPayload(BaseModel):
-    challenge_id: str = Field(min_length=8, max_length=64)
-    otp: str = Field(min_length=4, max_length=10)
-
-
 class GuardCreateRequest(BaseModel):
     employee_id: str = Field(min_length=3, max_length=40)
     email: str = Field(min_length=5, max_length=120)
     display_name: str = Field(min_length=2, max_length=80)
     mobile: str = Field(min_length=8, max_length=24)
     role: str = Field(default="guard", pattern=r"^(guard|atm_admin|govt_official|super_admin)$")
-    password: str = Field(min_length=8, max_length=128)
+    password: str = Field(min_length=12, max_length=128)
     address: str = Field(default="", max_length=200)
     pin_code: str = Field(default="", max_length=12)
     assigned_atms: list[str] = Field(default_factory=list)
@@ -176,15 +169,6 @@ class GuardUpdateRequest(BaseModel):
     emergency_contact: str | None = None
     verification_status: str | None = Field(default=None, pattern=r"^(pending|verified|suspended)$")
     status: str | None = Field(default=None, pattern=r"^(active|disabled)$")
-
-
-class AadhaarOtpRequest(BaseModel):
-    aadhaar_input: str = Field(min_length=4, max_length=16, description="Last 4 digits or 12 digits (never persisted in full)")
-
-
-class AadhaarOtpVerify(BaseModel):
-    challenge_id: str = Field(min_length=8, max_length=64)
-    otp: str = Field(min_length=4, max_length=10)
 
 
 class AssignmentUpdateRequest(BaseModel):
@@ -244,58 +228,38 @@ def portal_me(request: Request) -> dict[str, Any]:
 
 
 @router.post("/auth/login")
-def portal_login(payload: PortalLoginRequest, response: Response) -> dict[str, Any]:
+def portal_login(payload: PortalLoginRequest, request: Request, response: Response) -> dict[str, Any]:
     store.init_db()
     ident = payload.identifier.strip()
+    ident_hash = hashlib.sha256(ident.casefold().encode()).hexdigest()
+    remote = hashlib.sha256((request.client.host if request.client else "unknown").encode()).hexdigest()
+    cutoff = _iso(_now() - timedelta(minutes=15))
+    denied = False
+    locked = False
     with store.connect() as db:
+        db.execute("BEGIN IMMEDIATE")
+        db.execute("DELETE FROM portal_auth_attempts WHERE attempted_at<?", (_iso(_now() - timedelta(days=30)),))
+        per_user = db.execute(
+            "SELECT COUNT(*) FROM portal_auth_attempts WHERE identifier_hash=? AND attempted_at>=?",
+            (ident_hash, cutoff),
+        ).fetchone()[0]
+        per_remote = db.execute(
+            "SELECT COUNT(*) FROM portal_auth_attempts WHERE remote_hash=? AND attempted_at>=?",
+            (remote, cutoff),
+        ).fetchone()[0]
+        locked = per_user >= 5 or per_remote >= 40
         row = db.execute("SELECT * FROM portal_users WHERE employee_id=? OR email=?", (ident, ident.lower())).fetchone()
-    if not row or not store.verify_secret(payload.password, row["password_hash"]):
-        raise HTTPException(401, "Invalid Employee ID / email or passphrase.")
-    if row["status"] != "active":
-        raise HTTPException(403, "Security Portal account is disabled.")
+        valid = store.verify_secret(payload.password, row["password_hash"] if row else DUMMY_PASSWORD_HASH)
+        if not locked and (not row or row["status"] != "active" or not valid):
+            db.execute("INSERT INTO portal_auth_attempts VALUES(?,?,?)", (ident_hash, remote, _iso()))
+            denied = True
+        elif not locked:
+            db.execute("DELETE FROM portal_auth_attempts WHERE identifier_hash=?", (ident_hash,))
+    if locked:
+        raise HTTPException(429, "Too many sign-in attempts. Try again in 15 minutes.")
+    if denied:
+        raise HTTPException(401, "Employee ID/email or passphrase is incorrect.")
     return _issue_session(response, row)
-
-
-@router.post("/auth/otp/request")
-def portal_otp_request(payload: OtpRequestPayload) -> dict[str, Any]:
-    store.init_db()
-    ident = payload.identifier.strip()
-    with store.connect() as db:
-        row = db.execute("SELECT * FROM portal_users WHERE employee_id=? OR email=? OR mobile=?", (ident, ident.lower(), ident)).fetchone()
-        if not row or row["status"] != "active":
-            raise HTTPException(404, "No active guard/official found for that Employee ID or mobile.")
-        otp = f"{secrets.randbelow(900000) + 100000}"
-        cid = uuid.uuid4().hex
-        mob = str(row["mobile"] or "98XXXXXX00")
-        masked = f"{mob[:4]}****{mob[-2:]}" if len(mob) >= 6 else "****"
-        db.execute(
-            "INSERT INTO portal_otp_challenges VALUES(?,?,?,?,?,?,?,?)",
-            (cid, row["id"], "login", store.hash_secret(otp), masked, _iso(_now() + timedelta(minutes=5)), 0, _iso()),
-        )
-    return {
-        "challengeId": cid,
-        "maskedMobile": masked,
-        "demoOtpHint": otp,
-        "notice": "Offline sandbox OTP issued for local guard sign-in demo.",
-    }
-
-
-@router.post("/auth/otp/verify")
-def portal_otp_verify(payload: OtpVerifyPayload, response: Response) -> dict[str, Any]:
-    with store.connect() as db:
-        ch = db.execute("SELECT * FROM portal_otp_challenges WHERE id=? AND purpose='login'", (payload.challenge_id,)).fetchone()
-        if not ch or ch["expires_at"] <= _iso():
-            raise HTTPException(401, "OTP challenge expired or invalid.")
-        if int(ch["attempts"]) >= 5:
-            raise HTTPException(429, "Too many invalid OTP attempts.")
-        if not store.verify_secret(payload.otp.strip(), ch["otp_hash"]):
-            db.execute("UPDATE portal_otp_challenges SET attempts=attempts+1 WHERE id=?", (ch["id"],))
-            raise HTTPException(401, "Incorrect OTP code.")
-        db.execute("DELETE FROM portal_otp_challenges WHERE id=?", (ch["id"],))
-        user_row = db.execute("SELECT * FROM portal_users WHERE id=?", (ch["user_id"],)).fetchone()
-    if not user_row or user_row["status"] != "active":
-        raise HTTPException(403, "Account inactive.")
-    return _issue_session(response, user_row)
 
 
 @router.post("/auth/logout")
@@ -381,61 +345,6 @@ def update_guard(user_id: str, payload: GuardUpdateRequest, request: Request) ->
             db.execute(f"UPDATE portal_users SET {set_clause} WHERE id=?", (*updates.values(), user_id))
         updated = db.execute("SELECT * FROM portal_users WHERE id=?", (user_id,)).fetchone()
     return _public_user(updated)
-
-
-@router.post("/guards/{user_id}/aadhaar-otp/request")
-def request_aadhaar_ekyc_otp(user_id: str, payload: AadhaarOtpRequest, request: Request) -> dict[str, Any]:
-    sess = _require_auth(request)
-    if sess["user"]["role"] == "guard" and sess["user"]["id"] != user_id:
-        raise HTTPException(403, "Guards may only verify their own Aadhaar eKYC status.")
-    digits = "".join(ch for ch in payload.aadhaar_input if ch.isdigit())
-    if len(digits) not in (4, 12):
-        raise HTTPException(422, "Provide the last 4 digits (or 12 digits; only masked XXXX-XXXX-last4 is retained).")
-    last4 = digits[-4:]
-    masked = f"XXXX-XXXX-{last4}"
-    otp = f"{secrets.randbelow(900000) + 100000}"
-    cid = uuid.uuid4().hex
-    with store.connect() as db:
-        row = db.execute("SELECT * FROM portal_users WHERE id=?", (user_id,)).fetchone()
-        if not row:
-            raise HTTPException(404, "Guard record not found.")
-        db.execute(
-            "INSERT INTO portal_otp_challenges VALUES(?,?,?,?,?,?,?,?)",
-            (cid, user_id, "aadhaar_ekyc", store.hash_secret(otp), masked, _iso(_now() + timedelta(minutes=5)), 0, _iso()),
-        )
-    return {
-        "challengeId": cid,
-        "aadhaarMasked": masked,
-        "demoOtpHint": otp,
-        "notice": "Simulated UIDAI eKYC OTP adapter: raw 12-digit Aadhaar is never written to storage.",
-    }
-
-
-@router.post("/guards/{user_id}/aadhaar-otp/verify")
-def verify_aadhaar_ekyc_otp(user_id: str, payload: AadhaarOtpVerify, request: Request) -> dict[str, Any]:
-    sess = _require_auth(request)
-    if sess["user"]["role"] == "guard" and sess["user"]["id"] != user_id:
-        raise HTTPException(403, "Guards may only verify their own Aadhaar eKYC status.")
-    with store.connect() as db:
-        ch = db.execute(
-            "SELECT * FROM portal_otp_challenges WHERE id=? AND user_id=? AND purpose='aadhaar_ekyc'",
-            (payload.challenge_id, user_id),
-        ).fetchone()
-        if not ch or ch["expires_at"] <= _iso():
-            raise HTTPException(401, "Aadhaar OTP challenge expired or invalid.")
-        if int(ch["attempts"]) >= 5:
-            raise HTTPException(429, "Too many OTP attempts.")
-        if not store.verify_secret(payload.otp.strip(), ch["otp_hash"]):
-            db.execute("UPDATE portal_otp_challenges SET attempts=attempts+1 WHERE id=?", (ch["id"],))
-            raise HTTPException(401, "Invalid OTP code.")
-        ref_hash = hmac.new(store.bridge_service_key().encode(), f"{user_id}:{ch['masked_target']}".encode(), hashlib.sha256).hexdigest()
-        db.execute(
-            "UPDATE portal_users SET aadhaar_verified=1, aadhaar_masked=?, aadhaar_ref_hash=?, verification_status='verified' WHERE id=?",
-            (ch["masked_target"], ref_hash, user_id),
-        )
-        db.execute("DELETE FROM portal_otp_challenges WHERE id=?", (ch["id"],))
-        row = db.execute("SELECT * FROM portal_users WHERE id=?", (user_id,)).fetchone()
-    return _public_user(row)
 
 
 @router.get("/assignments")

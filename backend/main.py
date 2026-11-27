@@ -37,6 +37,7 @@ from reportlab.pdfgen import canvas
 from backend import analysis, auth, blockchain, forensics, store, streams
 from backend.security import encrypt_snapshot, sign_manifest, verify_manifest
 from security_portal import router as security_portal_router
+from security_portal import store as portal_store
 
 APP_NAME = "Drishti Forensic Review"
 ALLOWED_EXTENSIONS = {
@@ -52,6 +53,8 @@ analysis_pool: ThreadPoolExecutor | None = None
 def startup() -> None:
     global analysis_pool
     store.init_db()
+    portal_store.init_db()
+    portal_store.remove_demo_accounts()
     analysis_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="drishti-analysis")
     with store.connect() as db:
         interrupted = db.execute("SELECT id FROM analyses WHERE status IN ('queued','running')").fetchall()

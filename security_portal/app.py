@@ -26,14 +26,7 @@ def _escalation_loop() -> None:
 async def lifespan(_app: FastAPI):
     global _WORKER
     store.init_db()
-    with store.connect() as db:
-        db.execute("""UPDATE atm_assignments SET
-            guard_user_id = CASE WHEN guard_user_id IN ('guard-101','guard-102') THEN '' ELSE guard_user_id END,
-            admin_user_id = CASE WHEN admin_user_id = 'atm-admin-201' THEN '' ELSE admin_user_id END,
-            govt_user_id = CASE WHEN govt_user_id IN ('govt-301','govt-302') THEN '' ELSE govt_user_id END,
-            backup_govt_user_id = CASE WHEN backup_govt_user_id = 'govt-302' THEN '' ELSE backup_govt_user_id END""")
-        db.execute("""DELETE FROM portal_users WHERE employee_id IN
-            ('EMP-GRD-101','EMP-GRD-102','EMP-ADM-201','EMP-GOV-301','EMP-GOV-302','EMP-SUP-001')""")
+    store.remove_demo_accounts()
     _STOP.clear()
     _WORKER = threading.Thread(target=_escalation_loop, name="security-portal-sla", daemon=True)
     _WORKER.start()

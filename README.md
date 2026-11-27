@@ -57,7 +57,7 @@ Drishti AI integrates over authenticated loopback REST APIs (`POST /sec-api/brid
 - **3-Tier Priority Escalation + Web Audio Siren:**
   `ATM Camera (Drishti) → Priority 1: Assigned On-Duty Guard (Siren + SLA Countdown) → Priority 2: ATM Admin / Owner → Priority 3: Backup Govt Security Official`.
 - **Camera-interference delivery:** The assigned guard, ATM administrator, and police liaison can see these alerts in their portal accounts. The portal uses the ATM assignment to route the alert and verifies the snapshot hash before serving it. Production dispatch, SMS, and automatic selection of a police station are outside this local workflow.
-- **Guard Management, 4-Role RBAC & Aadhaar-Style eKYC OTP Sandbox:** Separate role logins for `Guard`, `ATM Admin / Owner`, `Government / Security Official`, and `Super Admin`. Guard profiles hold Name, Employee/Guard ID, Mobile, Address, PIN Code, Assigned ATMs, Duty Timings, Emergency Contact, Verification Status, and a simulated Aadhaar OTP verification workflow that never stores raw 12-digit Aadhaar numbers (retaining only masked `XXXX-XXXX-last4` + HMAC ref).
+- **Guard Management & 4-Role RBAC:** Separate password-based roles for `Guard`, `ATM Admin / Owner`, `Government / Security Official`, and `Super Admin`. Guard profiles hold Name, Employee/Guard ID, Mobile, Address, PIN Code, Assigned ATMs, Duty Timings, Emergency Contact, and an administrator-managed verification status. No SMS OTP or Aadhaar eKYC integration is implemented.
 
 ---
 

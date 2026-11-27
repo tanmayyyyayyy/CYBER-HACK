@@ -14,6 +14,7 @@ Drishti's product wedge is **transaction-time-first evidence triage**: narrow ho
 - Admin-only Security Center checks SQLite integrity/foreign keys, audit links, private file modes, denied sign-ins, and network boundary; full evidence rehash sweeps are recorded and alert on mismatch.
 - AES-256-GCM, passphrase-derived SQLite metadata snapshots with an integrity-checked restore utility; portable backups do not contain the large video/candidate media tree.
 - Security Portal accounts are no longer demo-seeded at startup. The first portal super admin must be provisioned locally with `python scripts/provision_portal_admin.py`; subsequent accounts are created by an authenticated super admin.
+- The portal no longer exposes simulated SMS/Aadhaar OTP verification. Portal login throttles by hashed account identifier and client address. `DRISHTI_COOKIE_SECURE=1` enables Secure cookies when deployed behind HTTPS; MFA and a real identity-verification provider remain future integrations.
 
 ## Before any operational pilot
 
