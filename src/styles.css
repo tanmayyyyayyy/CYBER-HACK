@@ -66,10 +66,17 @@ code, .hash-code, .mono-data, .topbar-clock strong, .candidate-card-meta, .simil
   border-bottom: 1px solid rgba(226, 234, 240, .12); padding: 8px 0;
 }
 .brand-lockup { display: flex; align-items: center; gap: 12px; }
-.brand-emblem {
-  width: 38px; height: 38px; border: 1px solid rgba(225, 168, 90, .82); color: #e1a85a;
-  display: grid; place-items: center; border-radius: 10px; background: rgba(225, 168, 90, .10); flex: 0 0 auto;
+.drishti-logo {
+  display: block;
+  flex: none;
+  height: auto;
+  max-width: 100%;
+  color: var(--drishti-ink, #102b48);
+  background: transparent;
 }
+.drishti-logo--mark { width: clamp(32px, 5vw, 42px); }
+.drishti-logo--lockup { width: clamp(148px, 16vw, 184px); }
+.top-nav-shell, .mobile-drawer, .auth-side-art { --drishti-ink: #f4f8fd; --drishti-accent: #f6b54d; }
 .brand-lockup strong { display: block; color: #fff; letter-spacing: .12em; font-size: 16px; font-weight: 700; line-height: 1.1; }
 .brand-lockup span { display: block; margin-top: 3px; font-size: 10.5px; line-height: 1; letter-spacing: .12em; color: #b7c5cf; font-weight: 600; }
 
@@ -619,11 +626,11 @@ code, .hash-code, .mono-data, .topbar-clock strong, .candidate-card-meta, .simil
 .auth-screen { min-height: 100vh; display: grid; grid-template-columns: minmax(330px, .9fr) 1.1fr; background: #f6f7f6; color: #192c3a; }
 .auth-side-art { position: relative; display: flex; flex-direction: column; justify-content: space-between; min-height: 100vh; overflow: hidden; padding: 38px clamp(34px, 6vw, 88px); color: #f6f8f9; background: radial-gradient(ellipse at 15% 85%, rgba(30, 101, 112, .38), transparent 48%), linear-gradient(145deg, #10253a, #193349 72%, #182f40); }
 .auth-side-art::after { content: ''; position: absolute; width: 560px; height: 560px; right: -340px; top: 24%; border: 1px solid rgba(255,255,255,.08); border-radius: 50%; box-shadow: 0 0 0 55px rgba(255,255,255,.025), 0 0 0 110px rgba(255,255,255,.02); }
-.auth-brand, .auth-mobile-brand { display: flex; align-items: center; gap: 12px; }
+.auth-brand, .auth-mobile-brand { display: flex; align-items: flex-start; gap: 12px; }
+.auth-brand { flex-direction: column; position: relative; z-index: 1; }
 .auth-brand > div:last-child { display: grid; gap: 3px; }
-.auth-brand strong, .auth-mobile-brand strong { font-size: 16px; letter-spacing: .17em; }
+.auth-brand strong { font-size: 16px; letter-spacing: .17em; }
 .auth-brand span { color: #b4c2cc; font-size: 11px; letter-spacing: .14em; }
-.auth-brand .brand-emblem { color: #d8e7e4; background: rgba(242,248,248,.1); border-color: rgba(255,255,255,.14); }
 .auth-art-copy { position: relative; z-index: 1; max-width: 520px; margin: auto 0; padding: 65px 0; }
 .auth-kicker { display: inline-flex; align-items: center; gap: 8px; color: #8ab9b0; font-size: 11.5px; font-weight: 700; letter-spacing: .14em; }
 .auth-art-copy h1 { margin: 24px 0 16px; font-size: clamp(38px, 4.5vw, 64px); line-height: 1.06; letter-spacing: -.045em; font-weight: 600; }
@@ -829,7 +836,6 @@ code, .hash-code, .mono-data, .topbar-clock strong, .candidate-card-meta, .simil
 @media (max-width: 640px) { .dossier-grid { grid-template-columns: 1fr; } }
 
 /* Separate Security & Escalation Portal */
-.sec-emblem { background: linear-gradient(140deg, #0d4a44, #1b6f63); color: #fff; }
 .sec-side-art { background: linear-gradient(155deg, #0b2633 0%, #103b43 60%, #164e4b 100%); }
 .sec-nav-shell { border-bottom-color: #1c5a52; }
 .sec-avatar { background: #145b50; color: #fff; }

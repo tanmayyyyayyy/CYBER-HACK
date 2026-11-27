@@ -7,6 +7,7 @@ import {
 import {
   AtmAssignment, PortalAlert, portalApi, PortalRole, PortalUser, RuleObservation, SecurityRule,
 } from './portalApi';
+import { Logo } from './Logo';
 
 type PortalTab = 'alerts' | 'guards' | 'routing';
 type PortalToast = { kind: 'success' | 'error'; message: string } | null;
@@ -67,8 +68,8 @@ export default function SecurityPortal() {
   if (loading) {
     return (
       <div className="auth-loading">
-        <div className="brand-emblem sec-emblem"><ShieldAlert size={22} /></div>
-        <strong>DRISHTI SECURITY PORTAL</strong>
+        <Logo variant="lockup" />
+        <strong>Security &amp; Escalation Portal</strong>
         <span>Connecting to Escalation Service…</span>
       </div>
     );
@@ -125,7 +126,7 @@ function PortalAuthScreen({ onAuthenticated, onToast, toast }: {
     <main className="auth-screen">
       <div className="auth-side-art sec-side-art">
         <div className="auth-brand">
-          <div className="brand-emblem sec-emblem"><ShieldAlert size={22} /></div>
+          <Logo variant="lockup" />
           <div><strong>SECURITY &amp; ESCALATION PORTAL</strong><span>GUARD · ATM ADMIN · GOVT RESPONSE TIER</span></div>
         </div>
         <div className="auth-art-copy">
@@ -139,6 +140,7 @@ function PortalAuthScreen({ onAuthenticated, onToast, toast }: {
       </div>
 
       <section className="auth-panel">
+        <div className="auth-mobile-brand"><Logo variant="lockup" /></div>
         <div className="auth-card">
           <span className="auth-kicker">ROLE-BASED COMMAND SIGN-IN</span>
           <h2>Guard &amp; Official Portal</h2>
@@ -272,7 +274,7 @@ function PortalWorkspace({ user, onSignOut, toast, onToast }: {
         <div className="top-nav-inner">
           <div className="top-utility-row">
             <div className="brand-lockup">
-              <div className="brand-emblem sec-emblem"><ShieldAlert size={21} /></div>
+              <Logo decorative />
               <div>
                 <strong>DRISHTI · SECURITY &amp; ESCALATION PORTAL</strong>
                 <span>{ROLE_LABELS[user.role]} · API BRIDGED TO DRISHTI AI</span>
