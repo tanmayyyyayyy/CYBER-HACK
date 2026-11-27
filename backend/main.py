@@ -16,6 +16,7 @@ import subprocess
 import uuid
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import quote
@@ -42,8 +43,43 @@ ALLOWED_EXTENSIONS = {
 MAX_UPLOAD_BYTES = 500 * 1024 * 1024
 LOCAL_ORIGINS = ["http://127.0.0.1:5174", "http://localhost:5174"]
 
-app = FastAPI(title=APP_NAME, version="0.2.0", docs_url="/api/docs", redoc_url=None)
 analysis_pool: ThreadPoolExecutor | None = None
+
+
+def startup() -> None:
+    global analysis_pool
+    store.init_db()
+    analysis_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="drishti-analysis")
+    with store.connect() as db:
+        interrupted = db.execute("SELECT id FROM analyses WHERE status IN ('queued','running')").fetchall()
+        for row in interrupted:
+            db.execute(
+                "UPDATE analyses SET status='failed',error=?,updated_at=? WHERE id=?",
+                ("Processing stopped because the local service restarted. Start this analysis again.", now(), row["id"]),
+            )
+            store.append_audit(db, "analysis.interrupted", row["id"], "Service restarted during analysis", now())
+    if os.environ.get("DRISHTI_DISABLE_AUTO_STREAMS") != "1":
+        streams.manager.start()
+
+
+def shutdown() -> None:
+    global analysis_pool
+    streams.manager.stop()
+    if analysis_pool is not None:
+        analysis_pool.shutdown(wait=True, cancel_futures=True)
+        analysis_pool = None
+
+
+@asynccontextmanager
+async def lifespan(_application: FastAPI):
+    startup()
+    try:
+        yield
+    finally:
+        shutdown()
+
+
+app = FastAPI(title=APP_NAME, version="0.2.0", docs_url="/api/docs", redoc_url=None, lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=LOCAL_ORIGINS,
@@ -815,32 +851,6 @@ def download_database_backup(backup_id: str, request: Request) -> FileResponse:
         filename=row["filename"],
         headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"},
     )
-
-
-@app.on_event("startup")
-def startup() -> None:
-    global analysis_pool
-    store.init_db()
-    analysis_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="drishti-analysis")
-    with store.connect() as db:
-        interrupted = db.execute("SELECT id FROM analyses WHERE status IN ('queued','running')").fetchall()
-        for row in interrupted:
-            db.execute(
-                "UPDATE analyses SET status='failed',error=?,updated_at=? WHERE id=?",
-                ("Processing stopped because the local service restarted. Start this analysis again.", now(), row["id"]),
-            )
-            store.append_audit(db, "analysis.interrupted", row["id"], "Service restarted during analysis", now())
-    if os.environ.get("DRISHTI_DISABLE_AUTO_STREAMS") != "1":
-        streams.manager.start()
-
-
-@app.on_event("shutdown")
-def shutdown() -> None:
-    global analysis_pool
-    streams.manager.stop()
-    if analysis_pool is not None:
-        analysis_pool.shutdown(wait=True, cancel_futures=True)
-        analysis_pool = None
 
 
 @app.get("/api/health")
