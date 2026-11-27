@@ -110,6 +110,7 @@ export type SurveillanceStream = {
   alertState: 'clear' | 'active' | 'alert';
   lastAlert: string;
   watchlistHit?: string;
+  repeatHit?: string;
   lastFrameAt: string;
   hasFaceCapture?: boolean;
   latestFaceScore?: number;
@@ -179,6 +180,54 @@ export type WatchlistEntry = {
   imageUrl: string;
 };
 
+export type LiveSighting = {
+  id: string;
+  cameraId: string;
+  score: number;
+  similarity: number;
+  sha256: string;
+  occurredAt: string;
+  imageUrl: string;
+};
+
+export type LiveEvidenceSubject = {
+  id: string;
+  subjectCode: string;
+  label: string;
+  bestScore: number;
+  bestSha256: string;
+  firstCameraId: string;
+  lastCameraId: string;
+  cameras: string[];
+  flags: string[];
+  sightingCount: number;
+  appearanceCount: number;
+  isRepeat: boolean;
+  firstSeenAt: string;
+  lastSeenAt: string;
+  imageUrl: string;
+  sightings: LiveSighting[];
+};
+
+export type LiveEvidenceResponse = {
+  summary: { totalSubjects: number; repeatSubjects: number; totalSightings: number };
+  subjects: LiveEvidenceSubject[];
+};
+
+export type LiveIncident = {
+  id: string;
+  cameraId: string;
+  kind: string;
+  severity: string;
+  summary: string;
+  subjectCode: string;
+  personCount: number;
+  faceCount: number;
+  sha256: string;
+  occurredAt: string;
+  imageUrl: string;
+};
+
 export type CaseJourney = {
   readinessScore: number;
   auditVerified: boolean;
@@ -189,6 +238,8 @@ export type CaseJourney = {
   bestFaceQuality: number;
   occlusionFlags: string[];
   watchlistCount: number;
+  liveSubjects?: number;
+  repeatSubjects?: number;
   alertCount: number;
   crossLinks: {
     sourceCamera: string;
@@ -276,6 +327,14 @@ export const api = {
   watchlist: () => request<WatchlistEntry[]>('/watchlist'),
   addToWatchlist: (candidate_id: string, label: string, case_ref = '') => request<WatchlistEntry>('/watchlist', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ candidate_id, label, case_ref }) }),
   removeWatchlist: (id: string) => request(`/watchlist/${id}`, { method: 'DELETE' }),
+  liveEvidence: () => request<LiveEvidenceResponse>('/live-evidence'),
+  renameLiveEvidence: (id: string, label: string) => request(`/live-evidence/${id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ label }) }),
+  promoteLiveToWatchlist: (id: string, label = '', case_ref = 'LIVE-CAPTURE') =>
+    request<WatchlistEntry>(`/api/live-evidence/${id}/watchlist`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ label, case_ref }) }),
+  deleteLiveEvidence: (id: string) => request(`/live-evidence/${id}`, { method: 'DELETE' }),
+  clearLiveEvidence: () => request<{ cleared: number }>('/live-evidence/clear', { method: 'POST' }),
+  liveIncidents: () => request<LiveIncident[]>('/live-incidents'),
+  deleteLiveIncident: (id: string) => request(`/live-incidents/${id}`, { method: 'DELETE' }),
   caseJourney: () => request<CaseJourney>('/cases/journey'),
   analyze: (payload: { clip_id: string; transaction_time: string; time_mode: 'clip' | 'absolute'; clip_start_time: string; transaction_ref: string; case_ref?: string; window_seconds: number }) =>
     request<{ id: string; status: string }>('/analyses', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }),

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import collections
+import hashlib
 import json
 import re
 import threading
@@ -79,6 +80,8 @@ class StreamState:
     latest_face_flags: list[str] = field(default_factory=list)
     latest_face_at: str = ""
     watchlist_hit: str = ""
+    repeat_hit: str = ""
+    repeat_hit_ts: float = 0.0
     custom_source: str = ""
     cleared: bool = False
     source_path: str = ""
@@ -87,7 +90,12 @@ class StreamState:
     next_track_id: int = 1
     track_start_ts: dict[int, float] = field(default_factory=dict)
     last_alert_ts: float = 0.0
+    last_priority_alert_ts: float = 0.0
     last_log_ts: float = 0.0
+    last_evidence_ts: float = 0.0
+    baseline_keypad_edges: float | None = None
+    tamper_streak: int = 0
+    last_incident_ts: dict[str, float] = field(default_factory=dict)
     ring_buffer: collections.deque[np.ndarray] = field(default_factory=lambda: collections.deque(maxlen=120))
 
 
@@ -101,12 +109,324 @@ class LocalSurveillanceManager:
 
     def __init__(self) -> None:
         self._lock = threading.RLock()
+        self._evidence_lock = threading.RLock()
+        self._evidence_cache: list[dict[str, Any]] | None = None
         self._running = False
         self._thread: threading.Thread | None = None
         self._face_detector = None
         self._streams: dict[str, StreamState] = {
             item["id"]: StreamState(meta=dict(item)) for item in STREAM_CATALOG
         }
+
+    def invalidate_evidence_cache(self) -> None:
+        with self._evidence_lock:
+            self._evidence_cache = None
+
+    def _load_live_identities(self) -> list[dict[str, Any]]:
+        with self._evidence_lock:
+            if self._evidence_cache is not None:
+                return self._evidence_cache
+            try:
+                with store.connect() as db:
+                    rows = db.execute(
+                        "SELECT * FROM live_identities ORDER BY last_seen_at DESC"
+                    ).fetchall()
+                loaded: list[dict[str, Any]] = []
+                for r in rows:
+                    vec = store.json_load(r["embedding_json"], [])
+                    if not vec:
+                        continue
+                    loaded.append(
+                        {
+                            "id": r["id"],
+                            "subject_code": r["subject_code"],
+                            "label": r["label"],
+                            "vec": vec,
+                            "best_score": float(r["best_score"]),
+                            "best_image_path": r["best_image_path"],
+                            "best_sha256": r["best_sha256"],
+                            "first_camera_id": r["first_camera_id"],
+                            "last_camera_id": r["last_camera_id"],
+                            "cameras": store.json_load(r["cameras_json"], []),
+                            "flags": store.json_load(r["flags_json"], []),
+                            "sighting_count": int(r["sighting_count"]),
+                            "appearance_count": int(r["appearance_count"]),
+                            "first_seen_at": r["first_seen_at"],
+                            "last_seen_at": r["last_seen_at"],
+                            "last_repeat_alert_at": r["last_repeat_alert_at"],
+                            "last_snapshot_at": r["last_seen_at"],
+                        }
+                    )
+                self._evidence_cache = loaded
+            except Exception:
+                self._evidence_cache = []
+            return self._evidence_cache
+
+    @staticmethod
+    def _parse_iso(ts: str) -> datetime | None:
+        if not ts:
+            return None
+        try:
+            dt = datetime.fromisoformat(ts)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _save_face_evidence_jpg(
+        roi: np.ndarray, face_row: np.ndarray | None, face_img: np.ndarray, sighting_id: str
+    ) -> tuple[str, str]:
+        crop = face_img
+        if face_row is not None and len(face_row) >= 4:
+            fx, fy, fw, fh = map(int, face_row[:4])
+            pad = max(8, int(max(fw, fh) * 0.28))
+            rh, rw = roi.shape[:2]
+            cx1, cy1 = max(0, fx - pad), max(0, fy - pad)
+            cx2, cy2 = min(rw, fx + fw + pad), min(rh, fy + fh + pad)
+            padded = roi[cy1:cy2, cx1:cx2]
+            if padded.size > 0:
+                crop = padded
+        store.LIVE_EVIDENCE.mkdir(parents=True, exist_ok=True, mode=0o700)
+        ok, jpg = cv2.imencode(".jpg", crop, [cv2.IMWRITE_JPEG_QUALITY, 92])
+        if not ok:
+            return "", ""
+        raw_bytes = jpg.tobytes()
+        digest = hashlib.sha256(raw_bytes).hexdigest()
+        target = store.LIVE_EVIDENCE / f"{sighting_id}.jpg"
+        target.write_bytes(raw_bytes)
+        try:
+            target.chmod(0o600)
+        except OSError:
+            pass
+        return str(target), digest
+
+    def record_live_face(
+        self,
+        camera_id: str,
+        roi: np.ndarray,
+        face_row: np.ndarray | None,
+        face_img: np.ndarray,
+        embedding: list[float],
+        emb_type: str,
+        q_score: float,
+        q_flags: list[str],
+        occurred_at: str | None = None,
+    ) -> dict[str, Any] | None:
+        """
+        Persistently collect detected live faces into SQLite (`live_identities` + `live_sightings`)
+        and alert whenever the same SFace 128-D subject re-appears repeatedly or switches cameras.
+        """
+        if emb_type != "sface_128d" or len(embedding) != 128:
+            return None
+
+        now_iso = occurred_at or _now_iso()
+        now_dt = self._parse_iso(now_iso) or datetime.now(timezone.utc)
+
+        with self._evidence_lock:
+            identities = self._load_live_identities()
+            best_match: dict[str, Any] | None = None
+            best_sim = 0.0
+            for item in identities:
+                sim = analysis.descriptor_similarity(embedding, item["vec"])
+                if sim is not None and sim >= 0.56 and sim > best_sim:
+                    best_sim = sim
+                    best_match = item
+
+            if best_match is None:
+                max_num = 0
+                for item in identities:
+                    code = str(item.get("subject_code", ""))
+                    if code.startswith("SUB-") and code[4:].isdigit():
+                        max_num = max(max_num, int(code[4:]))
+                subject_code = f"SUB-{max_num + 1:03d}"
+                ident_id = uuid.uuid4().hex
+                sighting_id = uuid.uuid4().hex
+                img_path, digest = self._save_face_evidence_jpg(roi, face_row, face_img, sighting_id)
+                if not img_path:
+                    return None
+                cameras = [camera_id]
+                emb_json = json.dumps(embedding)
+                flags_json = json.dumps(q_flags)
+                label = f"Auto-Captured {subject_code}"
+                with store.connect() as db:
+                    db.execute(
+                        """INSERT INTO live_identities(
+                            id,subject_code,label,embedding_json,best_score,best_image_path,best_sha256,
+                            first_camera_id,last_camera_id,cameras_json,flags_json,sighting_count,
+                            appearance_count,first_seen_at,last_seen_at,last_repeat_alert_at
+                        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        (
+                            ident_id,
+                            subject_code,
+                            label,
+                            emb_json,
+                            round(float(q_score), 1),
+                            img_path,
+                            digest,
+                            camera_id,
+                            camera_id,
+                            json.dumps(cameras),
+                            flags_json,
+                            1,
+                            1,
+                            now_iso,
+                            now_iso,
+                            "",
+                        ),
+                    )
+                    db.execute(
+                        "INSERT INTO live_sightings VALUES(?,?,?,?,?,?,?,?,?)",
+                        (
+                            sighting_id,
+                            ident_id,
+                            camera_id,
+                            round(float(q_score), 1),
+                            100.0,
+                            flags_json,
+                            img_path,
+                            digest,
+                            now_iso,
+                        ),
+                    )
+                    store.append_audit(
+                        db,
+                        "live_evidence.captured",
+                        ident_id,
+                        f"Collected {subject_code} on {camera_id} (Q {round(q_score)}/100, SHA {digest[:12]})",
+                        now_iso,
+                    )
+                entry = {
+                    "id": ident_id,
+                    "subject_code": subject_code,
+                    "label": label,
+                    "vec": embedding,
+                    "best_score": round(float(q_score), 1),
+                    "best_image_path": img_path,
+                    "best_sha256": digest,
+                    "first_camera_id": camera_id,
+                    "last_camera_id": camera_id,
+                    "cameras": cameras,
+                    "flags": list(q_flags),
+                    "sighting_count": 1,
+                    "appearance_count": 1,
+                    "first_seen_at": now_iso,
+                    "last_seen_at": now_iso,
+                    "last_repeat_alert_at": "",
+                    "last_snapshot_at": now_iso,
+                }
+                identities.insert(0, entry)
+                return {
+                    "identityId": ident_id,
+                    "subjectCode": subject_code,
+                    "label": label,
+                    "appearanceCount": 1,
+                    "sightingCount": 1,
+                    "cameras": cameras,
+                    "similarity": 100,
+                    "isNew": True,
+                    "isRepeatAlert": False,
+                }
+
+            # Existing subject matched in DB! Determine if this is a repeat/returning appearance.
+            last_seen_dt = self._parse_iso(best_match["last_seen_at"]) or now_dt
+            last_alert_dt = self._parse_iso(best_match.get("last_repeat_alert_at", ""))
+            last_snap_dt = self._parse_iso(best_match.get("last_snapshot_at", "")) or last_seen_dt
+            gap_seconds = max(0.0, (now_dt - last_seen_dt).total_seconds())
+            alert_gap = max(0.0, (now_dt - last_alert_dt).total_seconds()) if last_alert_dt else 9999.0
+            snap_gap = max(0.0, (now_dt - last_snap_dt).total_seconds())
+            switched_camera = camera_id != best_match["last_camera_id"]
+
+            is_repeat_return = (gap_seconds >= 8.0) or (switched_camera and gap_seconds >= 2.0)
+            trigger_repeat_alert = is_repeat_return and (alert_gap >= 6.0)
+            should_save_sighting = trigger_repeat_alert or (q_score >= best_match["best_score"] + 5.0) or (snap_gap >= 12.0)
+
+            cameras = list(best_match["cameras"])
+            if camera_id not in cameras:
+                cameras.append(camera_id)
+
+            sim_pct = int(round(best_sim * 100))
+            if trigger_repeat_alert:
+                best_match["appearance_count"] += 1
+                best_match["last_repeat_alert_at"] = now_iso
+
+            best_match["last_camera_id"] = camera_id
+            best_match["last_seen_at"] = now_iso
+            best_match["cameras"] = cameras
+
+            new_img_path = ""
+            new_digest = ""
+            if should_save_sighting:
+                sighting_id = uuid.uuid4().hex
+                new_img_path, new_digest = self._save_face_evidence_jpg(roi, face_row, face_img, sighting_id)
+                if new_img_path:
+                    best_match["sighting_count"] += 1
+                    best_match["last_snapshot_at"] = now_iso
+                    if q_score > best_match["best_score"]:
+                        best_match["best_score"] = round(float(q_score), 1)
+                        best_match["best_image_path"] = new_img_path
+                        best_match["best_sha256"] = new_digest
+                        best_match["vec"] = embedding
+                        best_match["flags"] = list(q_flags)
+
+            with store.connect() as db:
+                if should_save_sighting and new_img_path:
+                    db.execute(
+                        "INSERT INTO live_sightings VALUES(?,?,?,?,?,?,?,?,?)",
+                        (
+                            uuid.uuid4().hex,
+                            best_match["id"],
+                            camera_id,
+                            round(float(q_score), 1),
+                            round(best_sim * 100, 1),
+                            json.dumps(q_flags),
+                            new_img_path,
+                            new_digest,
+                            now_iso,
+                        ),
+                    )
+                db.execute(
+                    """UPDATE live_identities
+                       SET embedding_json=?,best_score=?,best_image_path=?,best_sha256=?,
+                           last_camera_id=?,cameras_json=?,flags_json=?,sighting_count=?,
+                           appearance_count=?,last_seen_at=?,last_repeat_alert_at=?
+                       WHERE id=?""",
+                    (
+                        json.dumps(best_match["vec"]),
+                        best_match["best_score"],
+                        best_match["best_image_path"],
+                        best_match["best_sha256"],
+                        best_match["last_camera_id"],
+                        json.dumps(best_match["cameras"]),
+                        json.dumps(best_match["flags"]),
+                        best_match["sighting_count"],
+                        best_match["appearance_count"],
+                        best_match["last_seen_at"],
+                        best_match["last_repeat_alert_at"],
+                        best_match["id"],
+                    ),
+                )
+                if trigger_repeat_alert:
+                    store.append_audit(
+                        db,
+                        "live_evidence.repeat_alert",
+                        best_match["id"],
+                        f"Repeat appearance #{best_match['appearance_count']} for {best_match['subject_code']} on {camera_id} ({sim_pct}% SFace match)",
+                        now_iso,
+                    )
+
+            return {
+                "identityId": best_match["id"],
+                "subjectCode": best_match["subject_code"],
+                "label": best_match["label"],
+                "appearanceCount": best_match["appearance_count"],
+                "sightingCount": best_match["sighting_count"],
+                "cameras": cameras,
+                "similarity": sim_pct,
+                "isNew": False,
+                "isRepeatAlert": trigger_repeat_alert,
+            }
 
     def is_running(self) -> bool:
         with self._lock:
@@ -137,6 +457,11 @@ class LocalSurveillanceManager:
                 state.alert_state = "clear"
                 state.last_alert = ""
                 state.watchlist_hit = ""
+                state.repeat_hit = ""
+                state.repeat_hit_ts = 0.0
+                state.last_evidence_ts = 0.0
+                state.baseline_keypad_edges = None
+                state.tamper_streak = 0
                 state.previous_boxes.clear()
                 state.track_start_ts.clear()
             return self.status()
@@ -150,6 +475,9 @@ class LocalSurveillanceManager:
                 state.latest_face_jpeg = b""
                 state.last_alert = ""
                 state.watchlist_hit = ""
+                state.repeat_hit = ""
+                state.repeat_hit_ts = 0.0
+                state.last_evidence_ts = 0.0
             return self.status()
 
         is_index = cleaned.isdigit() and 0 <= int(cleaned) <= 4
@@ -163,6 +491,9 @@ class LocalSurveillanceManager:
             state.latest_face_jpeg = b""
             state.last_alert = ""
             state.watchlist_hit = ""
+            state.repeat_hit = ""
+            state.repeat_hit_ts = 0.0
+            state.last_evidence_ts = 0.0
             state.previous_boxes.clear()
             state.track_start_ts.clear()
         return self.status()
@@ -220,6 +551,7 @@ class LocalSurveillanceManager:
 
         alert_msg = ""
         alert_kind = ""
+        detected_subject_code = ""
         tracks: list[tuple[int, tuple[int, int, int, int, float]]] = []
         face_boxes_to_draw: list[tuple[int, int, int, int, str, tuple[int, int, int]]] = []
         face_hits = 0
@@ -257,6 +589,26 @@ class LocalSurveillanceManager:
             elif max_dwell >= 10.0 and tracks:
                 alert_kind = "stream.loitering"
                 alert_msg = f"Extended dwell ({max_dwell:.0f}s) detected on {state.meta['id']}"
+
+            # Card-slot / keypad ROI structural shift heuristic when terminal zone is empty
+            if not in_zone:
+                kx1, ky1 = int(w * 0.35), int(h * 0.45)
+                kx2, ky2 = int(w * 0.72), int(h * 0.82)
+                k_roi = raw[ky1:ky2, kx1:kx2]
+                if k_roi.size > 0:
+                    edges = float(cv2.Canny(cv2.cvtColor(k_roi, cv2.COLOR_BGR2GRAY), 60, 150).mean())
+                    if state.baseline_keypad_edges is None:
+                        state.baseline_keypad_edges = edges
+                    elif abs(edges - state.baseline_keypad_edges) > 15.0:
+                        state.tamper_streak += 1
+                        if state.tamper_streak >= 4 and not alert_kind:
+                            alert_kind = "stream.tamper_skimming"
+                            alert_msg = f"Keypad / card-slot surface anomaly on {state.meta['id']} (skimming check)"
+                    else:
+                        state.tamper_streak = 0
+                        state.baseline_keypad_edges = state.baseline_keypad_edges * 0.92 + edges * 0.08
+            else:
+                state.tamper_streak = 0
 
             # 2) Run YuNet face detection on CLEAN raw frame ROIs
             detector = self._get_face_detector()
@@ -296,16 +648,33 @@ class LocalSurveillanceManager:
                         yaw = (float(face_row[8]) - eye_mid) / max(fw, 1)
                         q_score, _, q_flags = analysis._occlusion_and_quality(roi, face_row, face_img, conf, yaw)
 
-                        # Check live face against flagged Case Watchlist via SFace 128-D
+                        # Check live face against flagged Case Watchlist AND Auto-Collected Live DB Evidence via SFace 128-D
                         matched_label = ""
                         matched_sim = 0.0
-                        if watchlist:
-                            emb, _ = analysis._extract_embedding(roi, face_row, face_img)
-                            for entry in watchlist:
-                                sim = analysis.descriptor_similarity(emb, entry["vec"])
-                                if sim is not None and sim >= 0.56 and sim > matched_sim:
-                                    matched_sim = sim
-                                    matched_label = entry["label"]
+                        live_info: dict[str, Any] | None = None
+                        need_evidence = (now_mono - state.last_evidence_ts >= 0.9) and fw >= 24 and fh >= 24 and q_score >= 35.0
+                        if watchlist or need_evidence:
+                            emb, emb_type = analysis._extract_embedding(roi, face_row, face_img)
+                            if watchlist:
+                                for entry in watchlist:
+                                    sim = analysis.descriptor_similarity(emb, entry["vec"])
+                                    if sim is not None and sim >= 0.56 and sim > matched_sim:
+                                        matched_sim = sim
+                                        matched_label = entry["label"]
+                            if need_evidence and emb_type == "sface_128d":
+                                state.last_evidence_ts = now_mono
+                                live_info = self.record_live_face(
+                                    state.meta["id"],
+                                    roi,
+                                    face_row,
+                                    face_img,
+                                    emb,
+                                    emb_type,
+                                    q_score,
+                                    q_flags,
+                                )
+                                if live_info:
+                                    detected_subject_code = str(live_info.get("subjectCode", ""))
 
                         ax1, ay1 = ox + max(0, fx), oy + max(0, fy)
                         ax2, ay2 = ax1 + fw, ay1 + fh
@@ -317,16 +686,29 @@ class LocalSurveillanceManager:
                             alert_kind = "stream.suspect_match"
                             alert_msg = f"WATCHLIST MATCH on {state.meta['id']}: {matched_label} ({int(matched_sim * 100)}% SFace match)"
                             watchlist_match_label = f"{matched_label} ({int(matched_sim * 100)}%)"
+                        elif live_info and live_info.get("isRepeatAlert"):
+                            app_n = int(live_info["appearanceCount"])
+                            sub_code = str(live_info["subjectCode"])
+                            cams_path = " -> ".join(live_info["cameras"][-3:])
+                            sim_v = int(live_info["similarity"])
+                            f_color = (42, 92, 240)
+                            flabel = f"REPEAT {app_n}x · {sub_code} ({sim_v}%)"
+                            alert_kind = "stream.repeat_person"
+                            alert_msg = f"REPEAT PERSON on {state.meta['id']}: {sub_code} seen {app_n}x ({cams_path}, {sim_v}% SFace match)"
+                            state.repeat_hit = f"{sub_code} · Seen {app_n}x ({sim_v}%)"
+                            state.repeat_hit_ts = now_mono
                         elif has_occ:
                             occ_tag = next(f for f in q_flags if f.startswith("possible "))
                             f_color = (56, 128, 235)
-                            flabel = f"FACE {int(q_score)}% · {occ_tag.upper()}"
+                            sub_tag = f" · {live_info['subjectCode']} ({live_info['appearanceCount']}x)" if live_info else ""
+                            flabel = f"FACE {int(q_score)}% · {occ_tag.upper()}{sub_tag}"
                             if not alert_kind:
                                 alert_kind = "stream.occlusion_detected"
                                 alert_msg = f"{occ_tag.title()} flagged on {state.meta['id']} (Q {int(q_score)}/100)"
                         else:
                             f_color = (90, 198, 240)
-                            flabel = f"FACE {int(q_score)}%"
+                            sub_tag = f" · {live_info['subjectCode']} ({live_info['appearanceCount']}x)" if live_info else ""
+                            flabel = f"FACE {int(q_score)}%{sub_tag}"
 
                         face_boxes_to_draw.append((ax1, ay1, ax2, ay2, flabel, f_color))
                         if q_score > best_face_score:
@@ -342,16 +724,27 @@ class LocalSurveillanceManager:
                     state.latest_face_flags = best_face_flags
                     state.latest_face_at = _now_iso()
 
+            if state.repeat_hit and (now_mono - state.repeat_hit_ts > 8.0):
+                state.repeat_hit = ""
+
             state.person_count = len(tracks)
             state.face_count = face_hits
             state.active_tracks = len(state.previous_boxes)
             state.watchlist_hit = watchlist_match_label
-            state.alert_state = "alert" if alert_kind else ("active" if (tracks or face_hits) else "clear")
+            state.alert_state = "alert" if (alert_kind or state.repeat_hit) else ("active" if (tracks or face_hits) else "clear")
             if alert_msg:
                 state.last_alert = alert_msg
 
+            is_priority_alert = alert_kind in ("stream.suspect_match", "stream.repeat_person")
             has_activity = bool(tracks or face_hits)
-            if has_activity and (now_mono - state.last_log_ts >= 5.0 or (alert_kind and now_mono - state.last_alert_ts >= 10.0)):
+            should_emit_event = bool(
+                alert_kind
+                and (
+                    (is_priority_alert and now_mono - state.last_priority_alert_ts >= 4.0)
+                    or (not is_priority_alert and now_mono - state.last_alert_ts >= 10.0)
+                )
+            )
+            if has_activity and (now_mono - state.last_log_ts >= 5.0 or should_emit_event):
                 stamp = _now_iso()
                 state.last_log_ts = now_mono
                 try:
@@ -367,11 +760,15 @@ class LocalSurveillanceManager:
                                 round(float(top_box[4]), 3),
                                 alert_kind,
                                 stamp,
-                                json.dumps({"zone": state.meta["zone"], "source": state.source_label, "faces": face_hits, "watchlist": watchlist_match_label}),
+                                json.dumps({"zone": state.meta["zone"], "source": state.source_label, "faces": face_hits, "watchlist": watchlist_match_label, "repeat": state.repeat_hit}),
                             ),
                         )
-                        if alert_kind and now_mono - state.last_alert_ts >= 10.0:
-                            state.last_alert_ts = now_mono
+                        if should_emit_event:
+                            if is_priority_alert:
+                                state.last_priority_alert_ts = now_mono
+                            else:
+                                state.last_alert_ts = now_mono
+                            sev = "critical" if (alert_kind == "stream.suspect_match" or (alert_kind == "stream.repeat_person" and "seen 2x" not in alert_msg)) else "warning"
                             db.execute(
                                 "INSERT INTO events VALUES(?,?,?,?,?,?,?,?)",
                                 (
@@ -380,9 +777,9 @@ class LocalSurveillanceManager:
                                     None,
                                     alert_kind,
                                     alert_msg,
-                                    "critical" if alert_kind == "stream.suspect_match" else "warning",
+                                    sev,
                                     stamp,
-                                    json.dumps({"cameraId": state.meta["id"], "personCount": len(tracks), "faces": face_hits}),
+                                    json.dumps({"cameraId": state.meta["id"], "personCount": len(tracks), "faces": face_hits, "repeat": state.repeat_hit}),
                                 ),
                             )
                 except Exception:
@@ -408,10 +805,51 @@ class LocalSurveillanceManager:
         cv2.rectangle(canvas, (w - 92, h - 22), (w, h), (12, 34, 54), -1)
         cv2.putText(canvas, ts_str, (w - 82, h - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.44, (228, 236, 242), 1, cv2.LINE_AA)
 
-        if alert_kind:
-            bar_color = (182, 42, 42) if alert_kind == "stream.suspect_match" else (165, 62, 46)
+        if alert_kind or state.repeat_hit:
+            is_crit = alert_kind == "stream.suspect_match" or bool(state.repeat_hit)
+            bar_color = (182, 42, 42) if alert_kind == "stream.suspect_match" else ((36, 98, 212) if is_crit else (165, 62, 46))
+            bar_text = alert_msg if alert_kind else f"REPEAT: {state.repeat_hit}"
             cv2.rectangle(canvas, (0, h - 26), (w - 94, h), bar_color, -1)
-            cv2.putText(canvas, f"ALERT: {alert_msg[:58]}", (8, h - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (255, 255, 255), 1, cv2.LINE_AA)
+            cv2.putText(canvas, f"ALERT: {bar_text[:58]}", (8, h - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (255, 255, 255), 1, cv2.LINE_AA)
+
+        # 4) Auto-save full-scene evidence snapshot into SQLite `live_incidents` on suspicious alerts
+        if detect and alert_kind:
+            last_inc = state.last_incident_ts.get(alert_kind, 0.0)
+            if now_mono - last_inc >= 6.0:
+                state.last_incident_ts[alert_kind] = now_mono
+                inc_id = uuid.uuid4().hex
+                store.LIVE_EVIDENCE.mkdir(parents=True, exist_ok=True, mode=0o700)
+                ok_inc, inc_jpg = cv2.imencode(".jpg", canvas, [cv2.IMWRITE_JPEG_QUALITY, 90])
+                if ok_inc:
+                    raw_bytes = inc_jpg.tobytes()
+                    digest = hashlib.sha256(raw_bytes).hexdigest()
+                    inc_path = store.LIVE_EVIDENCE / f"inc-{inc_id}.jpg"
+                    inc_path.write_bytes(raw_bytes)
+                    try:
+                        inc_path.chmod(0o600)
+                    except OSError:
+                        pass
+                    sev = "critical" if alert_kind in ("stream.suspect_match", "stream.repeat_person") else "warning"
+                    try:
+                        with store.connect() as db:
+                            db.execute(
+                                "INSERT INTO live_incidents VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                                (
+                                    inc_id,
+                                    state.meta["id"],
+                                    alert_kind,
+                                    sev,
+                                    alert_msg,
+                                    detected_subject_code,
+                                    len(tracks),
+                                    face_hits,
+                                    str(inc_path),
+                                    digest,
+                                    _now_iso(),
+                                ),
+                            )
+                    except Exception:
+                        pass
         return canvas
 
     def _placeholder_jpeg(self, state: StreamState, message: str) -> bytes:
@@ -590,6 +1028,7 @@ class LocalSurveillanceManager:
                     "alertState": state.alert_state,
                     "lastAlert": state.last_alert,
                     "watchlistHit": state.watchlist_hit,
+                    "repeatHit": state.repeat_hit,
                     "lastFrameAt": state.last_frame_at,
                     "hasFaceCapture": bool(state.latest_face_jpeg),
                     "latestFaceScore": state.latest_face_score,

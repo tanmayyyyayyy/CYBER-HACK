@@ -12,7 +12,7 @@ import {
 import {
   api, Analysis, AuditIntegrity, AuditItem, AuthUser, CameraSlot, Candidate, CaseJourney, Clip,
   DatabaseBackup, EventItem, formatBytes, formatDuration, Health, JournalRow,
-  ReportsData, SecurityOverview, StreamDetection, StreamsResponse, WatchlistEntry,
+  LiveEvidenceResponse, LiveEvidenceSubject, LiveIncident, ReportsData, SecurityOverview, StreamDetection, StreamsResponse, WatchlistEntry,
 } from './api';
 
 type Page = 'surveillance' | 'desk' | 'intel' | 'library' | 'search' | 'reports' | 'audit' | 'review' | 'accounts' | 'security';
@@ -20,8 +20,8 @@ type Toast = { kind: 'success' | 'error'; message: string } | null;
 type SlotModalTarget = { channelId: string; streamId: string; replaceClipId?: string; mode?: 'file' | 'ipcam' } | null;
 
 const pageCopy: Record<Page, { title: string; subtitle: string }> = {
-  surveillance: { title: 'Surveillance wall', subtitle: '4-stream live person, face, occlusion & watchlist alerting (2 pilot feeds + 2 open IP Webcam/clip slots).' },
-  desk: { title: 'Case desk', subtitle: 'Link ATM CCTV footage to bank transaction timestamps and journals.' },
+  surveillance: { title: 'Live CCTV Guardian', subtitle: 'Real-time AI monitors ATM feeds for suspicious activity, collects DB evidence automatically & alerts when the same person returns.' },
+  desk: { title: 'Clip forensics', subtitle: 'Upload recorded ATM CCTV clips to link against bank transaction timestamps and journals.' },
   intel: { title: 'Case intel & journey', subtitle: 'Multi-camera suspect reconstruction, live SFace watchlist & courtroom readiness brief.' },
   library: { title: 'Video library', subtitle: 'Four local evidence channels with upload, replace, delete, FFmpeg normalization & container forensics.' },
   search: { title: 'Cross-clip search', subtitle: 'Search SFace 128-D face embeddings across other uploaded clips.' },
@@ -185,9 +185,9 @@ function Workspace({ user, onSignOut }: { user: AuthUser; onSignOut: () => Promi
 
   const navButtons = (
     <nav className="main-nav" aria-label="Main navigation">
-      <NavItem active={page === 'surveillance'} label="Surveillance wall" icon={<Radio size={15} />} count={streamsState?.running ? 4 : undefined} onClick={() => { setPage('surveillance'); setSmallNavOpen(false); }} />
-      <NavItem active={page === 'desk' || page === 'review'} label="Case desk" icon={<House size={15} />} onClick={() => { setPage('desk'); setSmallNavOpen(false); }} />
+      <NavItem active={page === 'surveillance'} label="Live CCTV" icon={<Radio size={15} />} count={streamsState?.running ? 4 : undefined} onClick={() => { setPage('surveillance'); setSmallNavOpen(false); }} />
       <NavItem active={page === 'intel'} label="Case intel" icon={<ShieldAlert size={15} />} count={watchlist.length || undefined} onClick={() => { setPage('intel'); setSmallNavOpen(false); }} />
+      <NavItem active={page === 'desk' || page === 'review'} label="Clip forensics" icon={<House size={15} />} onClick={() => { setPage('desk'); setSmallNavOpen(false); }} />
       <NavItem active={page === 'library'} label="Video library" icon={<Camera size={15} />} count={clips.length || undefined} onClick={() => { setPage('library'); setSmallNavOpen(false); }} />
       <NavItem active={page === 'search'} label="Face search" icon={<ScanFace size={15} />} onClick={() => openSearch()} />
       <NavItem active={page === 'reports'} label="Reports" icon={<BarChart3 size={15} />} onClick={() => { setPage('reports'); setSmallNavOpen(false); }} />
@@ -411,6 +411,9 @@ function SurveillanceWall({ state, events, watchlist, onRefresh, onOpenSlotModal
   onToast: (toast: Toast) => void;
 }) {
   const [detections, setDetections] = useState<StreamDetection[]>([]);
+  const [liveDb, setLiveDb] = useState<LiveEvidenceResponse | null>(null);
+  const [incidents, setIncidents] = useState<LiveIncident[]>([]);
+  const [previewIncident, setPreviewIncident] = useState<LiveIncident | null>(null);
   const [busy, setBusy] = useState(false);
   const [capturing, setCapturing] = useState('');
   const [tick, setTick] = useState(0);
@@ -420,7 +423,10 @@ function SurveillanceWall({ state, events, watchlist, onRefresh, onOpenSlotModal
 
   const loadDetections = useCallback(async () => {
     try {
-      setDetections(await api.streamDetections());
+      const [detList, dbEvidence, incList] = await Promise.all([api.streamDetections(), api.liveEvidence(), api.liveIncidents()]);
+      setDetections(detList);
+      setLiveDb(dbEvidence);
+      setIncidents(incList);
     } catch {
       /* ignore transient poll error */
     }
@@ -435,6 +441,48 @@ function SurveillanceWall({ state, events, watchlist, onRefresh, onOpenSlotModal
     }, 3000);
     return () => window.clearInterval(timer);
   }, [loadDetections, onRefresh]);
+
+  const promoteLive = async (subject: LiveEvidenceSubject) => {
+    try {
+      await api.promoteLiveToWatchlist(subject.id, subject.subjectCode);
+      onToast({ kind: 'success', message: `${subject.subjectCode} armed on live SFace watchlist across all cameras.` });
+      await loadDetections();
+      onRefresh();
+    } catch (err) {
+      onToast({ kind: 'error', message: err instanceof Error ? err.message : 'Could not arm live subject.' });
+    }
+  };
+
+  const deleteLive = async (subject: LiveEvidenceSubject) => {
+    try {
+      await api.deleteLiveEvidence(subject.id);
+      onToast({ kind: 'success', message: `Removed ${subject.subjectCode} from live DB evidence.` });
+      await loadDetections();
+      onRefresh();
+    } catch (err) {
+      onToast({ kind: 'error', message: err instanceof Error ? err.message : 'Could not remove live evidence.' });
+    }
+  };
+
+  const clearLiveDb = async () => {
+    try {
+      await api.clearLiveEvidence();
+      onToast({ kind: 'success', message: 'Cleared auto-collected live DB evidence & incident captures.' });
+      await loadDetections();
+      onRefresh();
+    } catch (err) {
+      onToast({ kind: 'error', message: err instanceof Error ? err.message : 'Could not clear live DB evidence.' });
+    }
+  };
+
+  const deleteIncident = async (id: string) => {
+    try {
+      await api.deleteLiveIncident(id);
+      await loadDetections();
+    } catch (err) {
+      onToast({ kind: 'error', message: err instanceof Error ? err.message : 'Could not delete incident snapshot.' });
+    }
+  };
 
   const toggle = async (running: boolean) => {
     setBusy(true);
@@ -499,6 +547,8 @@ function SurveillanceWall({ state, events, watchlist, onRefresh, onOpenSlotModal
   const streamAlerts = events.filter((e) => e.kind.startsWith('stream.') || e.kind.startsWith('suspicious.'));
   const faceStreams = (state?.streams || []).filter((s) => s.hasFaceCapture);
   const activeWatchlistHits = (state?.streams || []).filter((s) => s.watchlistHit);
+  const activeRepeatHits = (state?.streams || []).filter((s) => s.repeatHit);
+  const dbSubjects = liveDb?.subjects || [];
 
   return (
     <div className="wall-layout">
@@ -508,11 +558,13 @@ function SurveillanceWall({ state, events, watchlist, onRefresh, onOpenSlotModal
             <div className="wall-banner-icon"><Video size={20} /></div>
             <div>
               <strong>God&apos;s Eye 4-Stream Live AI &amp; IP Webcam Console</strong>
-              <span>2 default pilot feeds (`CAM-01`, `CAM-02`) + 2 open slots (`CAM-03`, `CAM-04`) for your IP Webcams or clips.</span>
+              <span>2 default pilot feeds (`CAM-01`, `CAM-02`) + 2 open slots (`CAM-03`, `CAM-04`). Faces auto-save to DB &amp; alert on repeat entry.</span>
             </div>
           </div>
           <div className="wall-banner-actions">
-            <span className="recorded-chip"><span /> {totalPersons} PERSONS · {totalFaces} FACES · {watchlist.length} WATCHLIST</span>
+            <span className="recorded-chip">
+              <span /> {totalPersons} PERSONS · {totalFaces} FACES · {liveDb?.summary.totalSubjects ?? 0} DB ({liveDb?.summary.repeatSubjects ?? 0} REPEAT) · {watchlist.length} WATCHLIST
+            </span>
             {running ? (
               <button className="button button-outline" disabled={busy} onClick={() => void toggle(false)}>
                 <Square size={15} /> Stop 4-Stream Pilot
@@ -578,7 +630,7 @@ function SurveillanceWall({ state, events, watchlist, onRefresh, onOpenSlotModal
                 )}
                 <span className={`stream-badge ${stream.alertState === 'alert' ? 'stream-badge-alert' : running && stream.sourceAvailable ? 'stream-badge-live' : ''}`}>
                   <i />
-                  {stream.watchlistHit ? `WATCHLIST · ${stream.id}` : stream.alertState === 'alert' ? `ALERT · ${stream.id}` : !stream.sourceAvailable ? `OPEN · ${stream.id}` : running ? `LIVE AI · ${stream.id}` : `STANDBY · ${stream.id}`}
+                  {stream.watchlistHit ? `WATCHLIST · ${stream.id}` : stream.repeatHit ? `REPEAT · ${stream.id}` : stream.alertState === 'alert' ? `ALERT · ${stream.id}` : !stream.sourceAvailable ? `OPEN · ${stream.id}` : running ? `LIVE AI · ${stream.id}` : `STANDBY · ${stream.id}`}
                 </span>
                 {stream.sourceAvailable && (
                   <span className="stream-count-pill">
@@ -634,9 +686,54 @@ function SurveillanceWall({ state, events, watchlist, onRefresh, onOpenSlotModal
             </div>
           ))}
 
+          {activeRepeatHits.map((hit) => (
+            <div className="repeat-alert-banner" key={`rep-${hit.id}`}>
+              <AlertTriangle size={18} />
+              <span>REPEAT PERSON ALERT on {hit.id}: {hit.repeatHit}</span>
+            </div>
+          ))}
+
           <section className="panel telemetry-panel">
-            <SectionTitle title="Live face captures" detail="YuNet face + mask/cap flags on active feeds" />
-            {faceStreams.length ? (
+            <SectionTitle
+              title="Live DB evidence &amp; repeat tracker"
+              detail={`${liveDb?.summary.totalSubjects ?? 0} saved in DB · ${liveDb?.summary.repeatSubjects ?? 0} repeat · ${liveDb?.summary.totalSightings ?? 0} crops`}
+              action={dbSubjects.length > 0 ? <button className="text-button" onClick={() => void clearLiveDb()}>Reset DB</button> : undefined}
+            />
+            {dbSubjects.length ? (
+              <div className="live-db-list">
+                {dbSubjects.map((sub) => (
+                  <div className={`live-db-card ${sub.isRepeat ? 'live-db-card-repeat' : ''}`} key={sub.id}>
+                    <img src={`${sub.imageUrl}?t=${tick}`} alt={sub.subjectCode} />
+                    <div className="live-db-meta">
+                      <div className="live-db-top">
+                        <strong>{sub.subjectCode}</strong>
+                        <span className={`repeat-count-pill ${sub.isRepeat ? 'is-repeat' : 'is-single'}`}>
+                          {sub.isRepeat ? `REPEAT ${sub.appearanceCount}×` : 'SAVED 1×'}
+                        </span>
+                      </div>
+                      <small>{sub.cameras.join(' → ')} · Q {Math.round(sub.bestScore)}/100 · {sub.sightingCount} crop(s)</small>
+                      <small>Last: {new Date(sub.lastSeenAt).toLocaleTimeString('en-IN')}{sub.flags.length ? ` · ${sub.flags[0]}` : ''}</small>
+                    </div>
+                    <div className="live-db-actions">
+                      <button
+                        className="button button-outline button-compact"
+                        title="Arm on persistent Watchlist"
+                        onClick={() => void promoteLive(sub)}
+                      >
+                        <ShieldAlert size={12} /> Arm
+                      </button>
+                      <button
+                        className="icon-button danger-hover"
+                        aria-label={`Remove ${sub.subjectCode}`}
+                        onClick={() => void deleteLive(sub)}
+                      >
+                        <Trash2 size={14} />
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : faceStreams.length ? (
               <div className="face-capture-strip">
                 {faceStreams.map((fs) => (
                   <div className="face-capture-card" key={fs.id}>
@@ -654,7 +751,35 @@ function SurveillanceWall({ state, events, watchlist, onRefresh, onOpenSlotModal
                 ))}
               </div>
             ) : (
-              <EmptyLine icon={<ScanFace size={18} />} title="No live faces captured yet" detail="Start 4-Stream Live AI or connect your IP Webcam to capture real faces." />
+              <EmptyLine icon={<ScanFace size={18} />} title="No live faces captured in DB yet" detail="Start 4-Stream Live AI or connect your IP Webcam. Clear faces save to SQLite DB and alert if they appear again." />
+            )}
+          </section>
+
+          <section className="panel telemetry-panel">
+            <SectionTitle
+              title="Auto-captured incident snapshots"
+              detail={`${incidents.length} suspicious scene(s) saved in DB`}
+            />
+            {incidents.length ? (
+              <div className="incident-list">
+                {incidents.slice(0, 10).map((inc) => (
+                  <div className={`incident-card ${inc.severity === 'critical' ? 'incident-card-critical' : ''}`} key={inc.id}>
+                    <button className="incident-thumb-btn" onClick={() => setPreviewIncident(inc)} title="Inspect saved evidence frame">
+                      <img src={inc.imageUrl} alt={inc.summary} />
+                    </button>
+                    <div className="incident-meta">
+                      <strong>{inc.summary}</strong>
+                      <small>{inc.cameraId} · {inc.kind.replace('stream.', '')}{inc.subjectCode ? ` · ${inc.subjectCode}` : ''}</small>
+                      <small>SHA {inc.sha256.slice(0, 10)} · {new Date(inc.occurredAt).toLocaleTimeString('en-IN')}</small>
+                    </div>
+                    <button className="icon-button danger-hover" aria-label="Remove incident" onClick={() => void deleteIncident(inc.id)}>
+                      <Trash2 size={14} />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <EmptyLine icon={<Camera size={18} />} title="No suspicious scene snapshots yet" detail="Shoulder-surfing, repeat visitor, mask/helmet, loitering & keypad tampering automatically save full scene photos here." />
             )}
           </section>
 
@@ -677,7 +802,7 @@ function SurveillanceWall({ state, events, watchlist, onRefresh, onOpenSlotModal
                 ))}
               </div>
             ) : (
-              <EmptyLine icon={<AlertTriangle size={18} />} title="No suspicious alerts" detail="Watchlist matches, shoulder-surfing, mask/cap occlusion & loitering alerts appear here." />
+              <EmptyLine icon={<AlertTriangle size={18} />} title="No suspicious alerts" detail="Watchlist matches, repeat visitors, shoulder-surfing, tampering, mask/cap occlusion & loitering alerts appear here." />
             )}
           </section>
 
@@ -706,6 +831,25 @@ function SurveillanceWall({ state, events, watchlist, onRefresh, onOpenSlotModal
           </section>
         </aside>
       </div>
+      {previewIncident && createPortal(
+        <div className="modal-backdrop" onClick={() => setPreviewIncident(null)}>
+          <div className="modal-card slot-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="panel-head">
+              <div>
+                <h3>{previewIncident.cameraId} · {previewIncident.kind.replace('stream.', '').toUpperCase()}</h3>
+                <p>{previewIncident.summary}</p>
+              </div>
+              <button className="icon-button" aria-label="Close modal" onClick={() => setPreviewIncident(null)}><X size={18} /></button>
+            </div>
+            <img className="incident-modal-img" src={previewIncident.imageUrl} alt={previewIncident.summary} />
+            <div className="evidence-note" style={{ marginTop: 10 }}>
+              <ShieldCheck size={16} />
+              <span>Captured {new Date(previewIncident.occurredAt).toLocaleString('en-IN')} · SHA-256: {previewIncident.sha256}</span>
+            </div>
+          </div>
+        </div>,
+        document.body
+      )}
     </div>
   );
 }
@@ -749,9 +893,9 @@ function CaseIntel({ watchlist, onReview, onOpenSurveillance, onRefresh, onToast
     <>
       <div className="stat-row">
         <Stat label="Case readiness" value={`${journey?.readinessScore ?? 0}%`} detail={journey?.auditVerified ? 'Audit chain verified' : 'Check security center'} icon={<ShieldCheck size={19} />} tone="teal" />
-        <Stat label="Camera coverage" value={`${journey?.channelsCovered ?? 0} / 4`} detail={`${journey?.clipCount ?? 0} local clip(s)`} icon={<Camera size={19} />} />
+        <Stat label="Camera coverage" value={`${journey?.channelsCovered ?? 0} / 4`} detail={`${journey?.clipCount ?? 0} clip(s) · ${journey?.liveSubjects ?? 0} live DB`} icon={<Camera size={19} />} />
         <Stat label="Cross-cam SFace links" value={journey?.crossLinks.length ?? 0} detail={`${journey?.bestFaceQuality ?? 0}/100 peak face score`} icon={<ScanFace size={19} />} tone="amber" />
-        <Stat label="Active watchlist" value={watchlist.length} detail={`${journey?.alertCount ?? 0} behaviour/live alert(s)`} icon={<ShieldAlert size={19} />} tone="red" />
+        <Stat label="Active watchlist" value={watchlist.length} detail={`${journey?.repeatSubjects ?? 0} repeat · ${journey?.alertCount ?? 0} alert(s)`} icon={<ShieldAlert size={19} />} tone="red" />
       </div>
 
       <div className="intel-grid">

@@ -15,6 +15,7 @@ DATA = Path(os.environ.get("DRISHTI_DATA_DIR", ROOT / "backend" / "data")).resol
 UPLOADS = DATA / "uploads"
 CANDIDATES = DATA / "candidates"
 BACKUPS = DATA / "backups"
+LIVE_EVIDENCE = DATA / "live_evidence"
 DEMO_FEEDS = ROOT / "demo_feeds"
 DB_PATH = DATA / "drishti.sqlite3"
 SIGNING_KEY_PATH = DATA / "signing.key"
@@ -26,7 +27,8 @@ def connect() -> sqlite3.Connection:
     UPLOADS.mkdir(parents=True, exist_ok=True, mode=0o700)
     CANDIDATES.mkdir(parents=True, exist_ok=True, mode=0o700)
     BACKUPS.mkdir(parents=True, exist_ok=True, mode=0o700)
-    for directory in (DATA, UPLOADS, CANDIDATES, BACKUPS):
+    LIVE_EVIDENCE.mkdir(parents=True, exist_ok=True, mode=0o700)
+    for directory in (DATA, UPLOADS, CANDIDATES, BACKUPS, LIVE_EVIDENCE):
         try:
             directory.chmod(0o700)
         except OSError:
@@ -130,6 +132,48 @@ def init_db() -> None:
                 image_path TEXT NOT NULL DEFAULT '',
                 created_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS live_identities (
+                id TEXT PRIMARY KEY,
+                subject_code TEXT NOT NULL UNIQUE,
+                label TEXT NOT NULL DEFAULT '',
+                embedding_json TEXT NOT NULL,
+                best_score REAL NOT NULL DEFAULT 0,
+                best_image_path TEXT NOT NULL,
+                best_sha256 TEXT NOT NULL DEFAULT '',
+                first_camera_id TEXT NOT NULL,
+                last_camera_id TEXT NOT NULL,
+                cameras_json TEXT NOT NULL DEFAULT '[]',
+                flags_json TEXT NOT NULL DEFAULT '[]',
+                sighting_count INTEGER NOT NULL DEFAULT 1,
+                appearance_count INTEGER NOT NULL DEFAULT 1,
+                first_seen_at TEXT NOT NULL,
+                last_seen_at TEXT NOT NULL,
+                last_repeat_alert_at TEXT NOT NULL DEFAULT ''
+            );
+            CREATE TABLE IF NOT EXISTS live_sightings (
+                id TEXT PRIMARY KEY,
+                identity_id TEXT NOT NULL REFERENCES live_identities(id) ON DELETE CASCADE,
+                camera_id TEXT NOT NULL,
+                score REAL NOT NULL,
+                similarity REAL NOT NULL,
+                flags_json TEXT NOT NULL DEFAULT '[]',
+                image_path TEXT NOT NULL,
+                sha256 TEXT NOT NULL DEFAULT '',
+                occurred_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS live_incidents (
+                id TEXT PRIMARY KEY,
+                camera_id TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                severity TEXT NOT NULL,
+                summary TEXT NOT NULL,
+                subject_code TEXT NOT NULL DEFAULT '',
+                person_count INTEGER NOT NULL DEFAULT 0,
+                face_count INTEGER NOT NULL DEFAULT 0,
+                image_path TEXT NOT NULL,
+                sha256 TEXT NOT NULL DEFAULT '',
+                occurred_at TEXT NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS audit_log (
                 id TEXT PRIMARY KEY,
                 action TEXT NOT NULL,
@@ -184,6 +228,9 @@ def init_db() -> None:
             CREATE INDEX IF NOT EXISTS idx_events_time ON events(occurred_at DESC);
             CREATE INDEX IF NOT EXISTS idx_stream_detections_time ON stream_detections(occurred_at DESC);
             CREATE INDEX IF NOT EXISTS idx_audit_time ON audit_log(occurred_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_live_identities_seen ON live_identities(last_seen_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_live_sightings_ident ON live_sightings(identity_id, occurred_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_live_incidents_time ON live_incidents(occurred_at DESC);
             """
         )
         clip_columns = {row[1] for row in db.execute("PRAGMA table_info(clips)")}

@@ -354,6 +354,15 @@ class WatchlistRequest(BaseModel):
     case_ref: str = Field(default="", max_length=40)
 
 
+class LiveEvidenceLabelRequest(BaseModel):
+    label: str = Field(min_length=2, max_length=60)
+
+
+class PromoteLiveRequest(BaseModel):
+    label: str = Field(default="", max_length=60)
+    case_ref: str = Field(default="", max_length=40)
+
+
 PUBLIC_AUTH_PATHS = {"/api/health", "/api/auth/bootstrap", "/api/auth/signup", "/api/auth/login", "/api/openapi.json", "/api/docs"}
 
 
@@ -747,6 +756,8 @@ def startup() -> None:
                 ("Processing stopped because the local service restarted. Start this analysis again.", now(), row["id"]),
             )
             store.append_audit(db, "analysis.interrupted", row["id"], "Service restarted during analysis", now())
+    if os.environ.get("DRISHTI_DISABLE_AUTO_STREAMS") != "1":
+        streams.manager.start()
 
 
 @app.on_event("shutdown")
@@ -1561,6 +1572,240 @@ def delete_watchlist(entry_id: str) -> dict:
     return {"deleted": entry_id}
 
 
+def _safe_live_evidence_path(raw_path: str) -> Path | None:
+    try:
+        resolved = Path(raw_path).resolve()
+        if resolved.is_relative_to(store.LIVE_EVIDENCE.resolve()) and resolved.is_file():
+            return resolved
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+@app.get("/api/live-evidence")
+def list_live_evidence(limit: int = 40) -> dict:
+    capped = max(1, min(limit, 100))
+    with store.connect() as db:
+        totals = db.execute(
+            """SELECT COUNT(*) AS subjects,
+                      SUM(CASE WHEN appearance_count >= 2 THEN 1 ELSE 0 END) AS repeats,
+                      COALESCE(SUM(sighting_count), 0) AS sightings
+               FROM live_identities"""
+        ).fetchone()
+        rows = db.execute(
+            """SELECT * FROM live_identities
+               ORDER BY CASE WHEN appearance_count >= 2 THEN 0 ELSE 1 END,
+                        appearance_count DESC,
+                        last_seen_at DESC
+               LIMIT ?""",
+            (capped,),
+        ).fetchall()
+        subjects = []
+        for r in rows:
+            s_rows = db.execute(
+                "SELECT * FROM live_sightings WHERE identity_id=? ORDER BY occurred_at DESC LIMIT 6",
+                (r["id"],),
+            ).fetchall()
+            subjects.append(
+                {
+                    "id": r["id"],
+                    "subjectCode": r["subject_code"],
+                    "label": r["label"],
+                    "bestScore": round(float(r["best_score"]), 1),
+                    "bestSha256": r["best_sha256"],
+                    "firstCameraId": r["first_camera_id"],
+                    "lastCameraId": r["last_camera_id"],
+                    "cameras": store.json_load(r["cameras_json"], []),
+                    "flags": store.json_load(r["flags_json"], []),
+                    "sightingCount": int(r["sighting_count"]),
+                    "appearanceCount": int(r["appearance_count"]),
+                    "isRepeat": int(r["appearance_count"]) >= 2,
+                    "firstSeenAt": r["first_seen_at"],
+                    "lastSeenAt": r["last_seen_at"],
+                    "imageUrl": f"/api/live-evidence/{r['id']}/image",
+                    "sightings": [
+                        {
+                            "id": s["id"],
+                            "cameraId": s["camera_id"],
+                            "score": round(float(s["score"]), 1),
+                            "similarity": round(float(s["similarity"]), 1),
+                            "sha256": s["sha256"],
+                            "occurredAt": s["occurred_at"],
+                            "imageUrl": f"/api/live-evidence/sightings/{s['id']}/image",
+                        }
+                        for s in s_rows
+                    ],
+                }
+            )
+    return {
+        "summary": {
+            "totalSubjects": int(totals["subjects"] or 0),
+            "repeatSubjects": int(totals["repeats"] or 0),
+            "totalSightings": int(totals["sightings"] or 0),
+        },
+        "subjects": subjects,
+    }
+
+
+@app.get("/api/live-evidence/{identity_id}/image")
+def live_evidence_image(identity_id: str) -> FileResponse:
+    with store.connect() as db:
+        row = db.execute("SELECT best_image_path FROM live_identities WHERE id=?", (identity_id,)).fetchone()
+    if not row:
+        raise HTTPException(404, "Live evidence subject not found.")
+    path = _safe_live_evidence_path(row["best_image_path"])
+    if not path:
+        raise HTTPException(404, "Live evidence image not found on disk.")
+    return FileResponse(path, media_type="image/jpeg", headers={"Cache-Control": "private, no-store"})
+
+
+@app.get("/api/live-evidence/sightings/{sighting_id}/image")
+def live_sighting_image(sighting_id: str) -> FileResponse:
+    with store.connect() as db:
+        row = db.execute("SELECT image_path FROM live_sightings WHERE id=?", (sighting_id,)).fetchone()
+    if not row:
+        raise HTTPException(404, "Live sighting not found.")
+    path = _safe_live_evidence_path(row["image_path"])
+    if not path:
+        raise HTTPException(404, "Sighting image not found on disk.")
+    return FileResponse(path, media_type="image/jpeg", headers={"Cache-Control": "private, no-store"})
+
+
+@app.patch("/api/live-evidence/{identity_id}")
+def update_live_evidence(identity_id: str, payload: LiveEvidenceLabelRequest) -> dict:
+    clean_label = payload.label.strip()
+    with store.connect() as db:
+        cur = db.execute("UPDATE live_identities SET label=? WHERE id=?", (clean_label, identity_id))
+        if cur.rowcount == 0:
+            raise HTTPException(404, "Live evidence subject not found.")
+        store.append_audit(db, "live_evidence.renamed", identity_id, f"Renamed live subject to '{clean_label}'", now())
+    streams.manager.invalidate_evidence_cache()
+    return {"id": identity_id, "label": clean_label}
+
+
+@app.post("/api/live-evidence/{identity_id}/watchlist", status_code=201)
+def promote_live_to_watchlist(identity_id: str, payload: PromoteLiveRequest) -> dict:
+    with store.connect() as db:
+        row = db.execute("SELECT * FROM live_identities WHERE id=?", (identity_id,)).fetchone()
+    if not row:
+        raise HTTPException(404, "Live evidence subject not found.")
+    entry_id = uuid.uuid4().hex
+    stamp = now()
+    label = payload.label.strip() or f"{row['subject_code']} ({row['label']})"[:60]
+    case_ref = payload.case_ref.strip() or "LIVE-CAPTURE"
+    with store.connect() as db:
+        db.execute(
+            "INSERT INTO case_watchlist VALUES(?,?,?,?,?,?,?,?)",
+            (entry_id, label, case_ref, "", "", row["embedding_json"], row["best_image_path"], stamp),
+        )
+        store.append_audit(
+            db,
+            "watchlist.flagged",
+            entry_id,
+            f"Promoted live DB subject {row['subject_code']} ('{label}') to live SFace watchlist",
+            stamp,
+        )
+    return {
+        "id": entry_id,
+        "label": label,
+        "caseRef": case_ref,
+        "candidateId": "",
+        "clipId": "",
+        "createdAt": stamp,
+        "imageUrl": f"/api/watchlist/{entry_id}/image",
+    }
+
+
+@app.delete("/api/live-evidence/{identity_id}")
+def delete_live_evidence(identity_id: str) -> dict:
+    with store.connect() as db:
+        row = db.execute("SELECT best_image_path, subject_code FROM live_identities WHERE id=?", (identity_id,)).fetchone()
+        if not row:
+            raise HTTPException(404, "Live evidence subject not found.")
+        sighting_rows = db.execute("SELECT image_path FROM live_sightings WHERE identity_id=?", (identity_id,)).fetchall()
+        db.execute("DELETE FROM live_identities WHERE id=?", (identity_id,))
+        store.append_audit(db, "live_evidence.deleted", identity_id, f"Removed live evidence subject {row['subject_code']}", now())
+    for raw_p in [row["best_image_path"], *[s["image_path"] for s in sighting_rows]]:
+        p = _safe_live_evidence_path(raw_p)
+        if p:
+            p.unlink(missing_ok=True)
+    streams.manager.invalidate_evidence_cache()
+    return {"deleted": identity_id}
+
+
+@app.post("/api/live-evidence/clear")
+def clear_live_evidence() -> dict:
+    with store.connect() as db:
+        count_row = db.execute("SELECT COUNT(*) FROM live_identities").fetchone()
+        sighting_rows = db.execute("SELECT image_path FROM live_sightings").fetchall()
+        id_rows = db.execute("SELECT best_image_path FROM live_identities").fetchall()
+        inc_rows = db.execute("SELECT image_path FROM live_incidents").fetchall()
+        db.execute("DELETE FROM live_sightings")
+        db.execute("DELETE FROM live_identities")
+        db.execute("DELETE FROM live_incidents")
+        store.append_audit(db, "live_evidence.cleared", "live-db", f"Cleared {count_row[0]} auto-collected live subject(s) & incidents", now())
+    for raw_p in [*(r["image_path"] for r in sighting_rows), *(r["best_image_path"] for r in id_rows), *(r["image_path"] for r in inc_rows)]:
+        p = _safe_live_evidence_path(raw_p)
+        if p:
+            p.unlink(missing_ok=True)
+    streams.manager.invalidate_evidence_cache()
+    for state in streams.manager._streams.values():
+        state.repeat_hit = ""
+        state.repeat_hit_ts = 0.0
+        state.last_incident_ts.clear()
+    return {"cleared": int(count_row[0])}
+
+
+@app.get("/api/live-incidents")
+def list_live_incidents(limit: int = 30) -> list[dict]:
+    with store.connect() as db:
+        rows = db.execute(
+            "SELECT * FROM live_incidents ORDER BY occurred_at DESC LIMIT ?",
+            (max(1, min(limit, 100)),),
+        ).fetchall()
+    return [
+        {
+            "id": r["id"],
+            "cameraId": r["camera_id"],
+            "kind": r["kind"],
+            "severity": r["severity"],
+            "summary": r["summary"],
+            "subjectCode": r["subject_code"],
+            "personCount": int(r["person_count"]),
+            "faceCount": int(r["face_count"]),
+            "sha256": r["sha256"],
+            "occurredAt": r["occurred_at"],
+            "imageUrl": f"/api/live-incidents/{r['id']}/image",
+        }
+        for r in rows
+    ]
+
+
+@app.get("/api/live-incidents/{incident_id}/image")
+def live_incident_image(incident_id: str) -> FileResponse:
+    with store.connect() as db:
+        row = db.execute("SELECT image_path FROM live_incidents WHERE id=?", (incident_id,)).fetchone()
+    if not row:
+        raise HTTPException(404, "Live incident snapshot not found.")
+    path = _safe_live_evidence_path(row["image_path"])
+    if not path:
+        raise HTTPException(404, "Incident snapshot missing on disk.")
+    return FileResponse(path, media_type="image/jpeg", headers={"Cache-Control": "private, no-store"})
+
+
+@app.delete("/api/live-incidents/{incident_id}")
+def delete_live_incident(incident_id: str) -> dict:
+    with store.connect() as db:
+        row = db.execute("SELECT image_path FROM live_incidents WHERE id=?", (incident_id,)).fetchone()
+        if not row:
+            raise HTTPException(404, "Live incident not found.")
+        db.execute("DELETE FROM live_incidents WHERE id=?", (incident_id,))
+    p = _safe_live_evidence_path(row["image_path"])
+    if p:
+        p.unlink(missing_ok=True)
+    return {"deleted": incident_id}
+
+
 @app.get("/api/cases/journey")
 def case_journey() -> dict:
     """
@@ -1579,6 +1824,7 @@ def case_journey() -> dict:
         cand_rows = [dict(r) for r in db.execute("SELECT * FROM candidates ORDER BY score DESC").fetchall()]
         event_rows = [dict(r) for r in db.execute("SELECT * FROM events ORDER BY occurred_at DESC LIMIT 80").fetchall()]
         watchlist_rows = [dict(r) for r in db.execute("SELECT * FROM case_watchlist ORDER BY created_at DESC").fetchall()]
+        live_rows = [dict(r) for r in db.execute("SELECT * FROM live_identities ORDER BY appearance_count DESC, last_seen_at DESC").fetchall()]
         audit_state = store.verify_audit(db)
 
     timeline: list[dict] = []
@@ -1690,6 +1936,8 @@ def case_journey() -> dict:
         "bestFaceQuality": round(best_score, 1),
         "occlusionFlags": sorted(occlusion_flags),
         "watchlistCount": len(watchlist_rows),
+        "liveSubjects": len(live_rows),
+        "repeatSubjects": sum(1 for lr in live_rows if int(lr["appearance_count"]) >= 2),
         "alertCount": len(alert_events),
         "crossLinks": cross_links,
         "timeline": timeline[:40],

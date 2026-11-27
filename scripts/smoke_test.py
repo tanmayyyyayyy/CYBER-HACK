@@ -217,6 +217,33 @@ def run() -> None:
             assert client.post("/api/streams/toggle", headers={"X-CSRF-Token": csrf}, json={"running": True}).json()["running"] is True
             assert client.post("/api/streams/toggle", headers={"X-CSRF-Token": csrf}, json={"running": False}).json()["running"] is False
 
+            # Live auto-evidence capture into SQLite DB & repeat-appearance SFace alert verification
+            from backend import streams as stream_mod
+
+            stream_mod.manager.invalidate_evidence_cache()
+            test_emb = [round(1.0 / (128 ** 0.5), 6)] * 128
+            ev1 = stream_mod.manager.record_live_face(
+                "CAM-01", frame, None, frame, test_emb, "sface_128d", 84.0, [], occurred_at="2026-11-27T04:00:00+00:00"
+            )
+            assert ev1 and ev1["isNew"] is True and ev1["appearanceCount"] == 1
+            ev2 = stream_mod.manager.record_live_face(
+                "CAM-02", frame, None, frame, test_emb, "sface_128d", 88.0, [], occurred_at="2026-11-27T04:00:10+00:00"
+            )
+            assert ev2 and ev2["isRepeatAlert"] is True and ev2["appearanceCount"] == 2
+            live_list = client.get("/api/live-evidence")
+            assert live_list.status_code == 200
+            assert live_list.json()["summary"]["totalSubjects"] == 1
+            assert live_list.json()["summary"]["repeatSubjects"] == 1
+            live_id = ev1["identityId"]
+            assert client.get(f"/api/live-evidence/{live_id}/image").status_code == 200
+            assert client.patch(f"/api/live-evidence/{live_id}", headers={"X-CSRF-Token": csrf}, json={"label": "Repeat Visitor A"}).status_code == 200
+            promoted = client.post(f"/api/live-evidence/{live_id}/watchlist", headers={"X-CSRF-Token": csrf}, json={"label": "Promoted Suspect"})
+            assert promoted.status_code == 201
+            assert client.delete(f"/api/watchlist/{promoted.json()['id']}", headers={"X-CSRF-Token": csrf}).status_code == 200
+            assert client.get("/api/live-incidents").status_code == 200
+            assert client.delete(f"/api/live-evidence/{live_id}", headers={"X-CSRF-Token": csrf}).status_code == 200
+            assert client.post("/api/live-evidence/clear", headers={"X-CSRF-Token": csrf}).status_code == 200
+
             journal_res = client.post(
                 "/api/journal/match",
                 headers={"X-CSRF-Token": csrf},
