@@ -20,8 +20,8 @@ type Toast = { kind: 'success' | 'error'; message: string } | null;
 type SlotModalTarget = { channelId: string; streamId: string; replaceClipId?: string; mode?: 'file' | 'ipcam' } | null;
 
 const pageCopy: Record<Page, { title: string; subtitle: string }> = {
-  surveillance: { title: 'Live CCTV Guardian', subtitle: 'Real-time AI monitors ATM feeds for suspicious activity, collects DB evidence automatically & alerts when the same person returns.' },
-  desk: { title: 'Clip forensics', subtitle: 'Upload recorded ATM CCTV clips to link against bank transaction timestamps and journals.' },
+  desk: { title: 'PS04 · ATM Suspect Face Extraction', subtitle: 'Link ATM CCTV / DVR footage to bank transaction timestamps, extract ranked suspect faces with quality flags & export sealed evidence.' },
+  surveillance: { title: 'Real-Time Detection Console (Local Sandbox)', subtitle: 'Optional real-time local/IP-Webcam AI monitor that collects suspicious scene & face DB evidence automatically and alerts on repeat appearances (no live bank CCTV link).' },
   intel: { title: 'Case intel & journey', subtitle: 'Multi-camera suspect reconstruction, live SFace watchlist & courtroom readiness brief.' },
   library: { title: 'Video library', subtitle: 'Four local evidence channels with upload, replace, delete, FFmpeg normalization & container forensics.' },
   search: { title: 'Cross-clip search', subtitle: 'Search SFace 128-D face embeddings across other uploaded clips.' },
@@ -67,7 +67,7 @@ function App() {
 }
 
 function Workspace({ user, onSignOut }: { user: AuthUser; onSignOut: () => Promise<void> }) {
-  const [page, setPage] = useState<Page>('surveillance');
+  const [page, setPage] = useState<Page>('desk');
   const [clips, setClips] = useState<Clip[]>([]);
   const [cameras, setCameras] = useState<CameraSlot[]>([]);
   const [analyses, setAnalyses] = useState<Analysis[]>([]);
@@ -185,9 +185,9 @@ function Workspace({ user, onSignOut }: { user: AuthUser; onSignOut: () => Promi
 
   const navButtons = (
     <nav className="main-nav" aria-label="Main navigation">
-      <NavItem active={page === 'surveillance'} label="Live CCTV" icon={<Radio size={15} />} count={streamsState?.running ? 4 : undefined} onClick={() => { setPage('surveillance'); setSmallNavOpen(false); }} />
+      <NavItem active={page === 'desk' || page === 'review'} label="Case desk" icon={<House size={15} />} onClick={() => { setPage('desk'); setSmallNavOpen(false); }} />
+      <NavItem active={page === 'surveillance'} label="Real-time AI" icon={<Radio size={15} />} count={streamsState?.running ? 4 : undefined} onClick={() => { setPage('surveillance'); setSmallNavOpen(false); }} />
       <NavItem active={page === 'intel'} label="Case intel" icon={<ShieldAlert size={15} />} count={watchlist.length || undefined} onClick={() => { setPage('intel'); setSmallNavOpen(false); }} />
-      <NavItem active={page === 'desk' || page === 'review'} label="Clip forensics" icon={<House size={15} />} onClick={() => { setPage('desk'); setSmallNavOpen(false); }} />
       <NavItem active={page === 'library'} label="Video library" icon={<Camera size={15} />} count={clips.length || undefined} onClick={() => { setPage('library'); setSmallNavOpen(false); }} />
       <NavItem active={page === 'search'} label="Face search" icon={<ScanFace size={15} />} onClick={() => openSearch()} />
       <NavItem active={page === 'reports'} label="Reports" icon={<BarChart3 size={15} />} onClick={() => { setPage('reports'); setSmallNavOpen(false); }} />
@@ -207,7 +207,7 @@ function Workspace({ user, onSignOut }: { user: AuthUser; onSignOut: () => Promi
             <div className="brand-lockup">
               <button className="icon-button menu-toggle" aria-label="Open navigation" onClick={() => setSmallNavOpen(true)}><Menu size={20} /></button>
               <div className="brand-emblem" aria-hidden="true"><ScanFace size={21} strokeWidth={1.8} /></div>
-              <div><strong>DRISHTI · CYBER CELL</strong><span>RAJASTHAN POLICE PS04 SURVEILLANCE &amp; FORENSICS</span></div>
+              <div><strong>DRISHTI · PS04 FORENSIC COMMAND</strong><span>ATM CCTV SUSPECT FACE EXTRACTION &amp; REAL-TIME LOCAL AI</span></div>
             </div>
 
             <div className="top-utility-right">

@@ -31,8 +31,8 @@ It links ATM CCTV recordings (and proprietary DVR/NVR exports) to bank transacti
 - **Bystander Privacy Redaction (`/api/candidates/{id}/frame-redacted`):** Generates a **Privacy Frame** preview that Gaussian-blurs bystanders outside the target suspect while preserving the selected candidate and stamping SHA-256 provenance.
 - **Human Review & Exports:** Mark candidates for review or exclusion with investigator notes, export a **Sealed PDF Evidence Sheet** (`/api/evidence/{id}.pdf`), and download an **HMAC-SHA256 Signed Manifest** (`/api/evidence/{id}/manifest.json`).
 
-### 5. 4-Stream Surveillance Wall, Auto DB Evidence & Repeat-Person Alerting ([`backend/streams.py`](backend/streams.py))
-- **Unified Control-Room View (`Live CCTV`):** Auto-starts on launch and displays 4 camera slots (`CAM-01` – `CAM-04`) side-by-side with **Live DB evidence & repeat tracker**, **Auto-captured incident snapshots**, **Live suspicious alerts**, and **Live detection log** on the same screen.
+### 5. Local Real-Time Detection Console, Auto DB Evidence & Repeat-Person Alerting ([`backend/streams.py`](backend/streams.py))
+- **Unified Control-Room View (`Real-time AI`):** Auto-starts on launch (sandboxed local clips / IP Webcam — zero bank CCTV link) and displays 4 camera slots (`CAM-01` – `CAM-04`) side-by-side with **Live DB evidence & repeat tracker**, **Auto-captured incident snapshots**, **Live suspicious alerts**, and **Live detection log** on the same screen.
 - **2 Default Feeds + 2 Open Slots:** Starts `CAM-01` and `CAM-02` on local pilot clips while leaving `CAM-03` and `CAM-04` ready for custom sources.
 - **Add / Change / Delete & IP Webcam Support:** Attach local video clips, Android **IP Webcam** URLs (`http://<phone-ip>:8080/video`), local `rtsp://...` feeds, or Mac/USB camera indices (`0`–`4`) to any slot, and run **Capture to Case** straight from a `120`-frame rolling buffer.
 - **Automatic DB Evidence Collection, Scene Incident Photos & Repeat Alerts (`/api/live-evidence`, `/api/live-incidents`):** As live feeds run, AI detects shoulder-surfing, extended loitering, mask/helmet occlusion, and keypad/card-slot surface tampering (`stream.tamper_skimming`), saving annotated scene snapshots + SHA-256 hashes into SQLite (`live_incidents`). Detected faces (`>= 0.56` normalized SFace threshold) are automatically cropped, hashed, and stored under `live_identities` + `live_sightings` (`SUB-001`, `SUB-002`, ...); returning or switching cameras immediately raises a **`stream.repeat_person` alert** (`REPEAT PERSON ALERT`) and saves a fresh evidence crop.
@@ -49,9 +49,9 @@ The sticky top navigation bar exposes 9 role-aware workspace tabs (`App.tsx`):
 
 | Tab | Role | Purpose |
 | :--- | :--- | :--- |
-| **Live CCTV** | All | Auto-started 4-camera live AI monitor (person, face, occlusion, tampering, shoulder-surfing, repeat visitor & watchlist), auto DB evidence & incident photos |
+| **Case desk** *(default)* | All | **PS04 Core Workflow:** 4 ATM channel slots (`ATM-01`–`04` add/change/delete), transaction linking, EJ CSV batch matcher, demo loader, & **Evidence review** |
+| **Real-time AI** | All | **Bonus Local Sandbox:** Auto-started 4-camera real-time monitor (person, face, occlusion, tampering, shoulder-surfing, repeat visitor & watchlist), auto DB evidence & incident photos (no live bank CCTV link) |
 | **Case intel** | All | Multi-camera suspect journey graph, live DB repeat counts, armed SFace watchlist cards, & courtroom readiness summary |
-| **Clip forensics** | All | 4 ATM channel slots (`ATM-01`–`04` add/change/delete), transaction linking, EJ CSV batch matcher, demo loader, & **Evidence review** |
 | **Video library** | All | Multi-format ingestion, FFmpeg normalization, codec/continuity forensics, & per-clip SHA-256 verification |
 | **Face search** | All | SFace 128-D embedding cosine similarity search across all local clips |
 | **Reports** | All | Forensic throughput, quality/occlusion metrics, and 4-stream telemetry |
