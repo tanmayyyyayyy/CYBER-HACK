@@ -976,13 +976,14 @@ class LocalSurveillanceManager:
             zone_gray = cv2.cvtColor(raw[zy1:zy2, zx1:zx2], cv2.COLOR_BGR2GRAY)
             if in_zone and state.prev_gray is not None and state.prev_gray.shape == zone_gray.shape:
                 diff = cv2.absdiff(zone_gray, state.prev_gray)
-                high_motion_ratio = float((diff > 26).mean())
-                flash_ratio = float((zone_gray > 238).mean())
-                if high_motion_ratio >= 0.16 or (flash_ratio >= 0.025 and high_motion_ratio >= 0.05):
+                high_motion_ratio = float((diff > 32).mean())
+                # Detect sudden new bright flare/torch pixels (ignore static overhead ceiling lights)
+                new_flash_ratio = float(((zone_gray > 242) & (state.prev_gray < 210)).mean())
+                if high_motion_ratio >= 0.36 or (new_flash_ratio >= 0.04 and high_motion_ratio >= 0.12):
                     state.shake_streak += 1
                 else:
                     state.shake_streak = max(0, state.shake_streak - 1)
-                if state.shake_streak >= 3 and not alert_kind:
+                if state.shake_streak >= 4 and not alert_kind:
                     alert_kind = "stream.atm_breach_alert"
                     prefix = "Rule 1 (Concealment) + Rule 2: " if state.rule1_active_until > now_mono else "Rule 2: "
                     alert_msg = f"{prefix}Suspicious ATM shaking / tampering / prying at {state.meta['channelId']}"
@@ -1141,9 +1142,9 @@ class LocalSurveillanceManager:
                     state.latest_face_flags = best_face_flags
                     state.latest_face_at = _now_iso()
 
-            # Also catch full motorcycle helmet / obscured face when person is inside ATM zone >= 1.8s with zero visible faces
-            if in_zone and face_hits == 0 and max_dwell >= 1.8 and state.rule1_active_until <= now_mono:
-                state.rule1_active_until = now_mono + 30.0
+            # Also catch full motorcycle helmet / obscured face when person stays inside ATM zone >= 3.0s with zero visible faces
+            if in_zone and face_hits == 0 and max_dwell >= 3.0 and state.rule1_active_until <= now_mono:
+                state.rule1_active_until = now_mono + 20.0
                 state.rule1_code = "RULE_1_CONCEALMENT"
                 state.rule1_note = f"Rule 1: Helmet / obscured face inside {state.meta['channelId']} (monitoring silently)"
                 if now_mono - state.last_bridge_obs_ts >= 12.0:
@@ -1159,8 +1160,13 @@ class LocalSurveillanceManager:
                         "subject_code": detected_subject_code,
                     })
 
+            # Once everyone leaves the camera view cleanly, stop showing Rule 1 banner on an empty room
+            if not tracks and face_hits == 0 and state.rule1_active_until > now_mono + 1.5:
+                state.rule1_active_until = now_mono + 1.5
+
             if state.rule1_active_until <= now_mono and not alert_kind:
                 state.rule1_note = ""
+                state.rule1_code = ""
 
             if state.repeat_hit and (now_mono - state.repeat_hit_ts > 8.0):
                 state.repeat_hit = ""
