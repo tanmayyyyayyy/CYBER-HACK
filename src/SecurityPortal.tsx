@@ -50,7 +50,7 @@ export default function SecurityPortal() {
   useEffect(() => {
     let alive = true;
     void portalApi.me()
-      .then((res) => { if (alive) setUser(res.user); })
+      .then((res) => { if (alive) setUser(res.user ?? null); })
       .catch(() => {})
       .finally(() => { if (alive) setLoading(false); });
     const expire = () => setUser(null);
@@ -82,7 +82,15 @@ export default function SecurityPortal() {
     <PortalWorkspace
       user={user}
       onUserUpdate={setUser}
-      onSignOut={async () => { await portalApi.logout(); setUser(null); }}
+      onSignOut={async () => {
+        try {
+          await portalApi.logout();
+        } catch {
+          /* ignore expired session on sign-out */
+        } finally {
+          setUser(null);
+        }
+      }}
       toast={toast}
       onToast={setToast}
     />
@@ -215,10 +223,10 @@ function PortalAuthScreen({ onAuthenticated, onToast, toast }: {
           {mode === 'password' ? (
             <form className="auth-form" onSubmit={(e) => void submitPassword(e)}>
               <label htmlFor="sec-ident">Employee / Guard ID or Email
-                <input id="sec-ident" name="identifier" required value={identifier} onChange={(e) => setIdentifier(e.target.value)} placeholder="EMP-GRD-101 or guard@atmsec.local" />
+                <input id="sec-ident" name="identifier" autoComplete="username" required value={identifier} onChange={(e) => setIdentifier(e.target.value)} placeholder="EMP-GRD-101 or guard@atmsec.local" />
               </label>
               <label htmlFor="sec-pass">Passphrase
-                <input id="sec-pass" name="password" type="password" required value={password} onChange={(e) => setPassword(e.target.value)} />
+                <input id="sec-pass" name="password" type="password" autoComplete="current-password" required value={password} onChange={(e) => setPassword(e.target.value)} />
               </label>
               <button className="button button-primary auth-submit" type="submit" disabled={busy}>
                 {busy ? <LoaderCircle className="spin" size={16} /> : <LockKeyhole size={16} />} Sign in to Security Portal <ArrowRight size={16} />
@@ -227,7 +235,7 @@ function PortalAuthScreen({ onAuthenticated, onToast, toast }: {
           ) : (
             <form className="auth-form" onSubmit={(e) => void verifyOtpLogin(e)}>
               <label htmlFor="sec-otp-id">Guard ID or Mobile
-                <input id="sec-otp-id" name="otp_identifier" required value={identifier} onChange={(e) => setIdentifier(e.target.value)} placeholder="EMP-GRD-101 or +91-98290-11201" />
+                <input id="sec-otp-id" name="otp_identifier" autoComplete="username" required value={identifier} onChange={(e) => setIdentifier(e.target.value)} placeholder="EMP-GRD-101 or +91-98290-11201" />
               </label>
               <button type="button" className="button button-outline button-compact" disabled={busy} onClick={() => void sendOtp()}>
                 <Sparkles size={14} /> Send Sandbox OTP
@@ -236,7 +244,7 @@ function PortalAuthScreen({ onAuthenticated, onToast, toast }: {
                 <>
                   <div className="auth-notice"><CheckCircle2 size={15} /> Sandbox OTP for {otpChallenge.masked}: <strong>{otpChallenge.hint}</strong></div>
                   <label htmlFor="sec-otp-code">Enter 6-Digit OTP
-                    <input id="sec-otp-code" name="otp_code" required value={otpCode} onChange={(e) => setOtpCode(e.target.value)} />
+                    <input id="sec-otp-code" name="otp_code" autoComplete="one-time-code" required value={otpCode} onChange={(e) => setOtpCode(e.target.value)} />
                   </label>
                   <button className="button button-primary auth-submit" type="submit" disabled={busy}>Verify OTP &amp; Enter <ArrowRight size={16} /></button>
                 </>
@@ -328,10 +336,15 @@ function PortalWorkspace({ user, onUserUpdate, onSignOut, toast, onToast }: {
   }, [activeUrgentAlert, sirenMuted]);
 
   const simulateBreach = async () => {
+    const targetAtm = user.assignedAtms[0] || 'ATM-01';
     try {
-      await portalApi.simulateBreach(user.assignedAtms[0] || 'ATM-01', true);
+      const simRes = await portalApi.simulateBreach(targetAtm, true);
       if (!sirenMuted) playSirenTone();
-      onToast({ kind: 'success', message: 'Simulated Rule 1 (Helmet Entry) → Rule 2 (Machine Shake) → Guard Priority 1 Siren!' });
+      if (simRes.action === 'deduplicated') {
+        onToast({ kind: 'success', message: `Open breach alert already active for ${targetAtm} (deduplicated) — acknowledge or resolve it to trigger a fresh siren.` });
+      } else {
+        onToast({ kind: 'success', message: `Simulated Rule 1 (Helmet Entry) → Rule 2 (Machine Shake) → Guard Priority 1 Siren on ${targetAtm}!` });
+      }
       await loadAll();
     } catch (e) {
       onToast({ kind: 'error', message: e instanceof Error ? e.message : 'Simulation failed.' });
@@ -577,7 +590,15 @@ function PortalWorkspace({ user, onUserUpdate, onSignOut, toast, onToast }: {
                       {canManage && g.verificationStatus !== 'verified' && (
                         <button
                           className="button button-primary button-compact"
-                          onClick={() => void portalApi.updateGuard(g.id, { verification_status: 'verified' }).then(loadAll)}
+                          onClick={async () => {
+                            try {
+                              await portalApi.updateGuard(g.id, { verification_status: 'verified' });
+                              onToast({ kind: 'success', message: `${g.displayName} marked verified.` });
+                              await loadAll();
+                            } catch (e) {
+                              onToast({ kind: 'error', message: e instanceof Error ? e.message : 'Guard approval failed.' });
+                            }
+                          }}
                         >
                           <BadgeCheck size={14} /> Approve Guard
                         </button>
@@ -598,7 +619,13 @@ function PortalWorkspace({ user, onUserUpdate, onSignOut, toast, onToast }: {
                     <thead><tr><th>ATM</th><th>P1 GUARD</th><th>P2 ATM ADMIN</th><th>P3 BACKUP GOVT</th><th>SLA (s)</th><th /></tr></thead>
                     <tbody>
                       {assignments.map((a) => (
-                        <AssignmentRow key={a.atmId} row={a} personnel={guards} onSaved={() => { onToast({ kind: 'success', message: `Saved escalation chain for ${a.atmId}` }); void loadAll(); }} />
+                        <AssignmentRow
+                          key={a.atmId}
+                          row={a}
+                          personnel={guards}
+                          onSaved={() => { onToast({ kind: 'success', message: `Saved escalation chain for ${a.atmId}` }); void loadAll(); }}
+                          onError={(msg) => onToast({ kind: 'error', message: msg })}
+                        />
                       ))}
                     </tbody>
                   </table>
@@ -615,7 +642,14 @@ function PortalWorkspace({ user, onUserUpdate, onSignOut, toast, onToast }: {
                     </div>
                     <button
                       className={`button button-compact ${r.enabled ? 'button-primary' : 'button-outline'}`}
-                      onClick={() => void portalApi.toggleRule(r.id, !r.enabled).then(loadAll)}
+                      onClick={async () => {
+                        try {
+                          await portalApi.toggleRule(r.id, !r.enabled);
+                          await loadAll();
+                        } catch (e) {
+                          onToast({ kind: 'error', message: e instanceof Error ? e.message : 'Could not update rule.' });
+                        }
+                      }}
                     >
                       {r.enabled ? 'Enabled' : 'Disabled'}
                     </button>
@@ -638,9 +672,9 @@ function PortalWorkspace({ user, onUserUpdate, onSignOut, toast, onToast }: {
               <button className="icon-button" onClick={() => setAadhaarModalUser(null)}><X size={18} /></button>
             </div>
             <div className="intake-form">
-              <label className="field-group">
+              <label className="field-group" htmlFor="ekyc-aadhaar-input">
                 <span className="field-label">Last 4 Digits (or 12-digit Test ID — auto-masked)</span>
-                <input value={aadhaarInput} onChange={(e) => setAadhaarInput(e.target.value)} maxLength={14} />
+                <input id="ekyc-aadhaar-input" name="aadhaar_input" value={aadhaarInput} onChange={(e) => setAadhaarInput(e.target.value)} maxLength={14} />
               </label>
               <button
                 type="button"
@@ -661,7 +695,7 @@ function PortalWorkspace({ user, onUserUpdate, onSignOut, toast, onToast }: {
               {ekycChallenge && (
                 <>
                   <div className="auth-notice"><CheckCircle2 size={15} /> Masked: {ekycChallenge.masked} · Demo OTP: <strong>{ekycChallenge.hint}</strong></div>
-                  <label className="field-group"><span className="field-label">Enter OTP</span><input value={ekycOtp} onChange={(e) => setEkycOtp(e.target.value)} /></label>
+                  <label className="field-group" htmlFor="ekyc-otp-input"><span className="field-label">Enter OTP</span><input id="ekyc-otp-input" name="ekyc_otp" autoComplete="one-time-code" value={ekycOtp} onChange={(e) => setEkycOtp(e.target.value)} /></label>
                   <button
                     type="button"
                     className="button button-primary"
@@ -704,11 +738,22 @@ function SectionHead({ title, detail }: { title: string; detail: string }) {
   return <div className="section-title"><div><h2>{title}</h2><p>{detail}</p></div></div>;
 }
 
-function AssignmentRow({ row, personnel, onSaved }: { row: AtmAssignment; personnel: PortalUser[]; onSaved: () => void }) {
+function AssignmentRow({ row, personnel, onSaved, onError }: {
+  row: AtmAssignment;
+  personnel: PortalUser[];
+  onSaved: () => void;
+  onError: (msg: string) => void;
+}) {
   const [guardId, setGuardId] = useState(row.guardUserId);
   const [adminId, setAdminId] = useState(row.adminUserId);
   const [backupId, setBackupId] = useState(row.backupGovtUserId);
   const [sla, setSla] = useState(row.p1SlaSeconds);
+  useEffect(() => {
+    setGuardId(row.guardUserId);
+    setAdminId(row.adminUserId);
+    setBackupId(row.backupGovtUserId);
+    setSla(row.p1SlaSeconds);
+  }, [row.guardUserId, row.adminUserId, row.backupGovtUserId, row.p1SlaSeconds]);
   const guardsOnly = personnel.filter((p) => p.role === 'guard');
   const adminsOnly = personnel.filter((p) => p.role === 'atm_admin' || p.role === 'super_admin');
   const govtOnly = personnel.filter((p) => p.role === 'govt_official' || p.role === 'super_admin');
@@ -717,35 +762,42 @@ function AssignmentRow({ row, personnel, onSaved }: { row: AtmAssignment; person
     <tr>
       <td><strong>{row.atmId}</strong><span>{row.atmName}</span></td>
       <td>
-        <select value={guardId} onChange={(e) => setGuardId(e.target.value)}>
+        <select id={`assign-guard-${row.atmId}`} name={`guard_${row.atmId}`} aria-label={`Priority 1 Guard for ${row.atmId}`} value={guardId} onChange={(e) => setGuardId(e.target.value)}>
           <option value="">Unassigned</option>
           {guardsOnly.map((g) => <option key={g.id} value={g.id}>{g.displayName}</option>)}
         </select>
       </td>
       <td>
-        <select value={adminId} onChange={(e) => setAdminId(e.target.value)}>
+        <select id={`assign-admin-${row.atmId}`} name={`admin_${row.atmId}`} aria-label={`Priority 2 ATM Admin for ${row.atmId}`} value={adminId} onChange={(e) => setAdminId(e.target.value)}>
           <option value="">Unassigned</option>
           {adminsOnly.map((a) => <option key={a.id} value={a.id}>{a.displayName}</option>)}
         </select>
       </td>
       <td>
-        <select value={backupId} onChange={(e) => setBackupId(e.target.value)}>
+        <select id={`assign-backup-${row.atmId}`} name={`backup_${row.atmId}`} aria-label={`Priority 3 Backup Govt Official for ${row.atmId}`} value={backupId} onChange={(e) => setBackupId(e.target.value)}>
           <option value="">Unassigned</option>
           {govtOnly.map((g) => <option key={g.id} value={g.id}>{g.displayName}</option>)}
         </select>
       </td>
-      <td><input type="number" min={5} max={300} value={sla} onChange={(e) => setSla(Number(e.target.value) || 20)} style={{ width: 64 }} /></td>
+      <td><input id={`assign-sla-${row.atmId}`} name={`sla_${row.atmId}`} aria-label={`SLA seconds for ${row.atmId}`} type="number" min={5} max={300} value={sla} onChange={(e) => setSla(Number(e.target.value) || 20)} style={{ width: 64 }} /></td>
       <td>
         <button
           className="button button-outline button-compact"
-          onClick={() => void portalApi.updateAssignment(row.atmId, {
-            guard_user_id: guardId,
-            admin_user_id: adminId,
-            govt_user_id: row.govtUserId || backupId,
-            backup_govt_user_id: backupId,
-            p1_sla_seconds: sla,
-            p2_sla_seconds: sla,
-          }).then(onSaved)}
+          onClick={async () => {
+            try {
+              await portalApi.updateAssignment(row.atmId, {
+                guard_user_id: guardId,
+                admin_user_id: adminId,
+                govt_user_id: row.govtUserId || backupId,
+                backup_govt_user_id: backupId,
+                p1_sla_seconds: sla,
+                p2_sla_seconds: sla,
+              });
+              onSaved();
+            } catch (e) {
+              onError(e instanceof Error ? e.message : `Failed to save escalation chain for ${row.atmId}.`);
+            }
+          }}
         >
           Save
         </button>
@@ -803,22 +855,22 @@ function NewGuardModal({ canCreateOfficials, onClose, onCreated, onError }: {
         </div>
         <form onSubmit={(e) => void submit(e)}>
           <div className="dossier-grid">
-            <input required placeholder="Employee / Guard ID" value={empId} onChange={(e) => setEmpId(e.target.value)} />
-            <input required placeholder="Full Name" value={name} onChange={(e) => setName(e.target.value)} />
-            <input required type="email" placeholder="Work Email" value={email} onChange={(e) => setEmail(e.target.value)} />
-            <input required placeholder="Mobile Number" value={mobile} onChange={(e) => setMobile(e.target.value)} />
-            <input placeholder="Address" value={address} onChange={(e) => setAddress(e.target.value)} />
-            <input placeholder="PIN Code" value={pinCode} onChange={(e) => setPinCode(e.target.value)} />
-            <input placeholder="Assigned ATMs (comma separated)" value={atms} onChange={(e) => setAtms(e.target.value)} />
-            <input placeholder="Duty Timing" value={duty} onChange={(e) => setDuty(e.target.value)} />
-            <input placeholder="Emergency Contact" value={emergency} onChange={(e) => setEmergency(e.target.value)} />
-            <select value={role} onChange={(e) => setRole(e.target.value as PortalRole)}>
+            <input id="new-guard-emp-id" name="employee_id" aria-label="Employee or Guard ID" autoComplete="username" required placeholder="Employee / Guard ID" value={empId} onChange={(e) => setEmpId(e.target.value)} />
+            <input id="new-guard-name" name="display_name" aria-label="Full Name" autoComplete="name" required placeholder="Full Name" value={name} onChange={(e) => setName(e.target.value)} />
+            <input id="new-guard-email" name="email" aria-label="Work Email" autoComplete="email" required type="email" placeholder="Work Email" value={email} onChange={(e) => setEmail(e.target.value)} />
+            <input id="new-guard-mobile" name="mobile" aria-label="Mobile Number" autoComplete="tel" required placeholder="Mobile Number" value={mobile} onChange={(e) => setMobile(e.target.value)} />
+            <input id="new-guard-address" name="address" aria-label="Address" autoComplete="street-address" placeholder="Address" value={address} onChange={(e) => setAddress(e.target.value)} />
+            <input id="new-guard-pin" name="pin_code" aria-label="PIN Code" autoComplete="postal-code" placeholder="PIN Code" value={pinCode} onChange={(e) => setPinCode(e.target.value)} />
+            <input id="new-guard-atms" name="assigned_atms" aria-label="Assigned ATMs" placeholder="Assigned ATMs (comma separated)" value={atms} onChange={(e) => setAtms(e.target.value)} />
+            <input id="new-guard-duty" name="duty_timing" aria-label="Duty Timing" placeholder="Duty Timing" value={duty} onChange={(e) => setDuty(e.target.value)} />
+            <input id="new-guard-emergency" name="emergency_contact" aria-label="Emergency Contact" autoComplete="tel" placeholder="Emergency Contact" value={emergency} onChange={(e) => setEmergency(e.target.value)} />
+            <select id="new-guard-role" name="role" aria-label="Portal Role" value={role} onChange={(e) => setRole(e.target.value as PortalRole)}>
               <option value="guard">Guard</option>
               <option value="atm_admin">ATM Admin / Owner</option>
               {canCreateOfficials && <option value="govt_official">Government Official</option>}
               {canCreateOfficials && <option value="super_admin">Super Admin</option>}
             </select>
-            <input required minLength={8} type="password" placeholder="Passphrase (8+ chars)" value={password} onChange={(e) => setPassword(e.target.value)} />
+            <input id="new-guard-password" name="password" aria-label="Passphrase" autoComplete="new-password" required minLength={8} type="password" placeholder="Passphrase (8+ chars)" value={password} onChange={(e) => setPassword(e.target.value)} />
             <button className="button button-primary button-compact" type="submit"><Database size={14} /> Save Record</button>
           </div>
         </form>

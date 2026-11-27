@@ -118,8 +118,8 @@ export const portalApi = {
   health: () => secRequest<{ status: string; service: string; usersCount: number; activeAlerts: number; observations: number }>('/health'),
   demoSeed: () => secRequest<{ seeded: number; accounts: { role: string; employeeId: string; email: string; hint: string }[] }>('/auth/demo-seed', { method: 'POST' }),
   me: async () => {
-    const r = await secRequest<{ user: PortalUser; csrfToken: string }>('/auth/me');
-    setPortalCsrf(r.csrfToken);
+    const r = await secRequest<{ authenticated?: boolean; user: PortalUser | null; csrfToken: string }>('/auth/me');
+    if (r.csrfToken) setPortalCsrf(r.csrfToken);
     return r;
   },
   login: async (identifier: string, password: string) => {
@@ -166,7 +166,9 @@ export const portalApi = {
     secRequest<SecurityRule>(`/rules/${id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled }) }),
   alerts: () => secRequest<{ alerts: PortalAlert[]; observations: RuleObservation[] }>('/alerts'),
   simulateBreach: (atm_id = 'ATM-01', with_prior_helmet = true) =>
-    secRequest('/alerts/simulate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ atm_id, with_prior_helmet }) }),
+    secRequest<{ action: string; alertId?: string; priority?: number; siren?: boolean }>('/alerts/simulate', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ atm_id, with_prior_helmet }),
+    }),
   acknowledgeAlert: (id: string) => secRequest(`/alerts/${id}/acknowledge`, { method: 'POST' }),
   escalateAlert: (id: string) => secRequest(`/alerts/${id}/escalate`, { method: 'POST' }),
   resolveAlert: (id: string) => secRequest(`/alerts/${id}/resolve`, { method: 'POST' }),

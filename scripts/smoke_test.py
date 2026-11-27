@@ -39,6 +39,8 @@ def make_synthetic_clip(path: Path) -> None:
 def run() -> None:
     with tempfile.TemporaryDirectory(prefix="drishti-smoke-") as temp:
         os.environ["DRISHTI_DATA_DIR"] = str(Path(temp) / "data")
+        os.environ.setdefault("DRISHTI_DISABLE_AUTO_STREAMS", "1")
+        os.environ.setdefault("DRISHTI_SECURITY_PORTAL_URL", "http://127.0.0.1:1/sec-api/bridge/event")
         fixture = Path(temp) / "synthetic-atm.mp4"
         make_synthetic_clip(fixture)
 
@@ -258,6 +260,8 @@ def run() -> None:
             # Separate Security Portal & Two-Stage Escalation verification (Rule 1 Silent -> Rule 2 Breach -> P1->P2->P3)
             from security_portal import store as portal_store
             assert client.get("/sec-api/health").status_code == 200
+            pre_me = client.get("/sec-api/auth/me")
+            assert pre_me.status_code == 200 and pre_me.json()["authenticated"] is False
             seed_res = client.post("/sec-api/auth/demo-seed")
             assert seed_res.status_code == 200
             # Bridge authentication check
@@ -293,6 +297,8 @@ def run() -> None:
             assert client.post(f"/sec-api/alerts/{alert_id}/escalate", headers={"X-Portal-CSRF": p_csrf}).json()["priority"] == 2
             assert client.post(f"/sec-api/alerts/{alert_id}/acknowledge", headers={"X-Portal-CSRF": p_csrf}).json()["status"] == "acknowledged"
             assert client.post(f"/sec-api/alerts/{alert_id}/resolve", headers={"X-Portal-CSRF": p_csrf}).json()["status"] == "resolved"
+            assert client.post(f"/sec-api/alerts/{alert_id}/acknowledge", headers={"X-Portal-CSRF": p_csrf}).status_code == 409
+            assert client.post(f"/sec-api/alerts/{alert_id}/escalate", headers={"X-Portal-CSRF": p_csrf}).status_code == 409
 
             journal_res = client.post(
                 "/api/journal/match",

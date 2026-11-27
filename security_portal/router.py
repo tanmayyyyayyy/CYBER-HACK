@@ -390,8 +390,8 @@ def portal_demo_seed() -> dict[str, Any]:
 def portal_me(request: Request) -> dict[str, Any]:
     sess = _session_for(request)
     if not sess:
-        raise HTTPException(401, "Not signed in to Security Portal.")
-    return {"user": sess["user"], "csrfToken": sess["csrf"]}
+        return {"authenticated": False, "user": None, "csrfToken": ""}
+    return {"authenticated": True, "user": sess["user"], "csrfToken": sess["csrf"]}
 
 
 @router.post("/auth/login")
@@ -453,6 +453,7 @@ def portal_otp_verify(payload: OtpVerifyPayload, response: Response) -> dict[str
 def portal_logout(request: Request, response: Response) -> dict[str, bool]:
     sess = _session_for(request)
     if sess:
+        _require_auth(request)
         with store.connect() as db:
             db.execute("DELETE FROM portal_sessions WHERE token_hash=?", (sess["token_hash"],))
     response.delete_cookie(PORTAL_COOKIE, path="/")
@@ -863,6 +864,8 @@ def acknowledge_alert(alert_id: str, request: Request) -> dict[str, Any]:
         row = db.execute("SELECT * FROM escalation_alerts WHERE id=?", (alert_id,)).fetchone()
         if not row:
             raise HTTPException(404, "Alert not found.")
+        if row["status"] == "resolved":
+            raise HTTPException(409, "Alert is already resolved.")
         tl = store.json_load(row["timeline_json"], [])
         tl.append({"at": stamp, "tier": f"Acknowledged by {user['displayName']}", "note": f"Siren silenced; responder ({user['role']}) handling incident."})
         db.execute(
@@ -881,8 +884,12 @@ def escalate_alert_manual(alert_id: str, request: Request) -> dict[str, Any]:
         row = db.execute("SELECT * FROM escalation_alerts WHERE id=?", (alert_id,)).fetchone()
         if not row:
             raise HTTPException(404, "Alert not found.")
+        if row["status"] == "resolved":
+            raise HTTPException(409, "Resolved alerts cannot be escalated.")
         tl = store.json_load(row["timeline_json"], [])
         cur_p = int(row["current_priority"])
+        if cur_p >= 3:
+            raise HTTPException(409, "Alert is already at maximum Priority 3 (Backup Govt Official).")
         if cur_p <= 1:
             next_p, next_status, tier = 2, "escalated_p2", "Priority 2 · ATM Admin"
         else:

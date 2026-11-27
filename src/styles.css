@@ -183,9 +183,10 @@ code, .hash-code, .mono-data, .topbar-clock strong, .candidate-card-meta, .simil
 .panel { min-width: 0; border: 1px solid #dce2e4; border-radius: 8px; background: var(--paper); box-shadow: var(--shadow); }
 .intake-panel, .camera-panel, .recent-panel, .activity-panel, .library-panel, .library-files, .candidate-panel, .selected-panel, .clip-player-panel, .timeline-panel, .search-source-panel, .search-results-panel, .report-panel, .report-events, .audit-panel { padding: 18px; }
 .section-title { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 14px; }
+.section-title > :first-child { min-width: 0; flex: 1 1 auto; }
 .section-title h2 { margin: 0; color: #1d3447; font-size: 16px; line-height: 1.25; font-weight: 600; }
-.section-title p { margin: 4px 0 0; color: #5f717e; font-size: 12.5px; line-height: 1.4; }
-.section-title > :last-child { flex: 0 0 auto; }
+.section-title p { margin: 4px 0 0; color: #5f717e; font-size: 12.5px; line-height: 1.4; overflow-wrap: anywhere; }
+.section-title > :last-child:not(:first-child) { flex: 0 0 auto; }
 
 .intake-form { display: grid; gap: 11px; }
 .field-label { display: block; margin-bottom: 5px; color: #364b5a; font-size: 12.5px; font-weight: 600; }

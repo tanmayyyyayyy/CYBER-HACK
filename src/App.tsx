@@ -206,7 +206,7 @@ function Workspace({ user, onSignOut }: { user: AuthUser; onSignOut: () => Promi
 
   return (
     <div className="app-shell">
-      <input ref={fileInput} className="sr-only" type="file" accept="video/*,.mpeg,.mpg,.dav,.h264,.264,.ts,.m4v,.asf,.vob" onChange={handleUpload} />
+      <input id="clip-file-upload" name="clip_file" aria-label="Upload CCTV video clip" ref={fileInput} className="sr-only" type="file" accept="video/*,.mpeg,.mpg,.dav,.h264,.264,.ts,.m4v,.asf,.vob" onChange={handleUpload} />
 
       <header className="top-nav-shell">
         <div className="top-nav-inner">
