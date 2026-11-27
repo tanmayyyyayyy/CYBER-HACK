@@ -805,6 +805,18 @@ code, .hash-code, .mono-data, .topbar-clock strong, .candidate-card-meta, .simil
 .incident-meta strong { font-size: 12px; color: #163348; line-height: 1.3; }
 .incident-meta small { font-size: 10.8px; color: #566977; font-family: 'IBM Plex Mono', monospace; }
 .incident-modal-img { width: 100%; border-radius: 7px; background: #122436; display: block; }
+.dossier-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; margin-bottom: 10px; }
+.dossier-grid input, .dossier-grid select {
+  width: 100%; height: 36px; padding: 0 9px; border: 1px solid #cfd8dd; border-radius: 5px;
+  font-size: 12.5px; background: #fff; color: #162e40;
+}
+.compliance-pills { display: flex; flex-wrap: wrap; gap: 7px; margin: 10px 0 4px; }
+.compliance-pill {
+  display: inline-flex; align-items: center; gap: 6px; padding: 5px 10px;
+  border: 1px solid #c9dcd7; border-radius: 999px; background: #f2faf7;
+  color: #175c4c; font-size: 12px; font-weight: 600;
+}
+@media (max-width: 640px) { .dossier-grid { grid-template-columns: 1fr; } }
 .slot-modal { width: min(560px, 100%); }
 .slot-modal-tabs { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 .slot-modal-option {

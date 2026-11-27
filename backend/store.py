@@ -176,6 +176,20 @@ def init_db() -> None:
                 sha256 TEXT NOT NULL DEFAULT '',
                 occurred_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS case_dossiers (
+                id TEXT PRIMARY KEY,
+                fir_number TEXT NOT NULL DEFAULT '',
+                ncrp_ack TEXT NOT NULL DEFAULT '',
+                police_station TEXT NOT NULL DEFAULT '',
+                io_name TEXT NOT NULL DEFAULT '',
+                io_badge TEXT NOT NULL DEFAULT '',
+                atm_id TEXT NOT NULL DEFAULT '',
+                bank_name TEXT NOT NULL DEFAULT '',
+                fraud_type TEXT NOT NULL DEFAULT 'ATM Cash-Out / Card Fraud',
+                loss_inr INTEGER NOT NULL DEFAULT 0,
+                notes TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS audit_log (
                 id TEXT PRIMARY KEY,
                 action TEXT NOT NULL,

@@ -228,6 +228,21 @@ export type LiveIncident = {
   imageUrl: string;
 };
 
+export type CaseDossier = {
+  id: string;
+  firNumber: string;
+  ncrpAck: string;
+  policeStation: string;
+  ioName: string;
+  ioBadge: string;
+  atmId: string;
+  bankName: string;
+  fraudType: string;
+  lossInr: number;
+  notes: string;
+  updatedAt: string;
+};
+
 export type CaseJourney = {
   readinessScore: number;
   auditVerified: boolean;
@@ -335,6 +350,19 @@ export const api = {
   clearLiveEvidence: () => request<{ cleared: number }>('/live-evidence/clear', { method: 'POST' }),
   liveIncidents: () => request<LiveIncident[]>('/live-incidents'),
   deleteLiveIncident: (id: string) => request(`/live-incidents/${id}`, { method: 'DELETE' }),
+  dossier: () => request<CaseDossier>('/dossier'),
+  saveDossier: (payload: {
+    fir_number: string;
+    ncrp_ack: string;
+    police_station: string;
+    io_name: string;
+    io_badge: string;
+    atm_id: string;
+    bank_name: string;
+    fraud_type: string;
+    loss_inr: number;
+    notes: string;
+  }) => request<CaseDossier>('/dossier', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }),
   caseJourney: () => request<CaseJourney>('/cases/journey'),
   analyze: (payload: { clip_id: string; transaction_time: string; time_mode: 'clip' | 'absolute'; clip_start_time: string; transaction_ref: string; case_ref?: string; window_seconds: number }) =>
     request<{ id: string; status: string }>('/analyses', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }),

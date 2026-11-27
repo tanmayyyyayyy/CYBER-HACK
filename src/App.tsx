@@ -10,7 +10,7 @@ import {
   UsersRound, Video, X,
 } from 'lucide-react';
 import {
-  api, Analysis, AuditIntegrity, AuditItem, AuthUser, CameraSlot, Candidate, CaseJourney, Clip,
+  api, Analysis, AuditIntegrity, AuditItem, AuthUser, CameraSlot, Candidate, CaseDossier, CaseJourney, Clip,
   DatabaseBackup, EventItem, formatBytes, formatDuration, Health, JournalRow,
   LiveEvidenceResponse, LiveEvidenceSubject, LiveIncident, ReportsData, SecurityOverview, StreamDetection, StreamsResponse, WatchlistEntry,
 } from './api';
@@ -848,9 +848,14 @@ function SurveillanceWall({ state, events, watchlist, onRefresh, onOpenSlotModal
             </div>
             <div className="form-row" style={{ marginTop: 10 }}>
               <span className="local-chip"><LockKeyhole size={14} /> AUTO-SAVED DB EVIDENCE</span>
-              <a className="button button-primary button-compact" href={previewIncident.imageUrl} download={`incident-${previewIncident.cameraId}-${previewIncident.id.slice(0, 8)}.jpg`}>
-                <Download size={14} /> Download Snapshot
-              </a>
+              <div className="stream-actions-row">
+                <a className="button button-outline button-compact" href={`/api/live-incidents/${previewIncident.id}.pdf`} download>
+                  <FileSearch size={14} /> Incident PDF
+                </a>
+                <a className="button button-primary button-compact" href={previewIncident.imageUrl} download={`incident-${previewIncident.cameraId}-${previewIncident.id.slice(0, 8)}.jpg`}>
+                  <Download size={14} /> Download Snapshot
+                </a>
+              </div>
             </div>
           </div>
         </div>,
@@ -868,11 +873,15 @@ function CaseIntel({ watchlist, onReview, onOpenSurveillance, onRefresh, onToast
   onToast: (toast: Toast) => void;
 }) {
   const [journey, setJourney] = useState<CaseJourney | null>(null);
+  const [dossier, setDossier] = useState<CaseDossier | null>(null);
+  const [savingDossier, setSavingDossier] = useState(false);
   const [loading, setLoading] = useState(true);
 
   const load = useCallback(async () => {
     try {
-      setJourney(await api.caseJourney());
+      const [j, d] = await Promise.all([api.caseJourney(), api.dossier()]);
+      setJourney(j);
+      setDossier(d);
     } catch (err) {
       onToast({ kind: 'error', message: err instanceof Error ? err.message : 'Could not load case intelligence.' });
     } finally {
@@ -883,6 +892,33 @@ function CaseIntel({ watchlist, onReview, onOpenSurveillance, onRefresh, onToast
   useEffect(() => {
     void load();
   }, [load]);
+
+  const saveDossier = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!dossier) return;
+    setSavingDossier(true);
+    try {
+      const saved = await api.saveDossier({
+        fir_number: dossier.firNumber,
+        ncrp_ack: dossier.ncrpAck,
+        police_station: dossier.policeStation,
+        io_name: dossier.ioName,
+        io_badge: dossier.ioBadge,
+        atm_id: dossier.atmId,
+        bank_name: dossier.bankName,
+        fraud_type: dossier.fraudType,
+        loss_inr: Number(dossier.lossInr) || 0,
+        notes: dossier.notes,
+      });
+      setDossier(saved);
+      onToast({ kind: 'success', message: 'Case Dossier saved. Stamped onto BSA Sec 63 Certs & PDF Evidence Bundles.' });
+      onRefresh();
+    } catch (err) {
+      onToast({ kind: 'error', message: err instanceof Error ? err.message : 'Could not save dossier.' });
+    } finally {
+      setSavingDossier(false);
+    }
+  };
 
   const removeWatch = async (id: string) => {
     try {
@@ -929,6 +965,38 @@ function CaseIntel({ watchlist, onReview, onOpenSurveillance, onRefresh, onToast
               </div>
             ) : (
               <EmptyLine icon={<ShieldAlert size={18} />} title="No suspects armed on live watchlist" detail="Open Evidence Review on any candidate and click 'Arm Live Watchlist' to alert across all cameras." />
+            )}
+          </section>
+
+          <section className="panel telemetry-panel">
+            <SectionTitle
+              title="1930 NCRP / FIR &amp; Bank Fraud Dossier"
+              detail="Metadata stamped into BSA Sec. 63 Certificates, PDF Sheets &amp; Case Bundles (never stores card/PIN)"
+            />
+            {dossier && (
+              <form onSubmit={(e) => void saveDossier(e)}>
+                <div className="dossier-grid">
+                  <input id="dossier-fir" name="fir_number" placeholder="FIR / GD Ref (e.g. FIR-0412/2026)" value={dossier.firNumber} onChange={(e) => setDossier({ ...dossier, firNumber: e.target.value })} />
+                  <input id="dossier-ncrp" name="ncrp_ack" placeholder="NCRP 1930 Ack No." value={dossier.ncrpAck} onChange={(e) => setDossier({ ...dossier, ncrpAck: e.target.value })} />
+                  <input id="dossier-station" name="police_station" placeholder="Cyber Police Station / Unit" value={dossier.policeStation} onChange={(e) => setDossier({ ...dossier, policeStation: e.target.value })} />
+                  <input id="dossier-io" name="io_name" placeholder="Investigating Officer Name" value={dossier.ioName} onChange={(e) => setDossier({ ...dossier, ioName: e.target.value })} />
+                  <input id="dossier-badge" name="io_badge" placeholder="IO Badge / Belt ID" value={dossier.ioBadge} onChange={(e) => setDossier({ ...dossier, ioBadge: e.target.value })} />
+                  <input id="dossier-bank" name="bank_name" placeholder="Bank / White-Label ATM Operator" value={dossier.bankName} onChange={(e) => setDossier({ ...dossier, bankName: e.target.value })} />
+                  <input id="dossier-atm" name="atm_id" placeholder="ATM Terminal ID (e.g. S1CN4412)" value={dossier.atmId} onChange={(e) => setDossier({ ...dossier, atmId: e.target.value })} />
+                  <input id="dossier-loss" name="loss_inr" type="number" min={0} placeholder="Fraud Amount (INR ₹)" value={dossier.lossInr || ''} onChange={(e) => setDossier({ ...dossier, lossInr: Number(e.target.value) || 0 })} />
+                </div>
+                <div className="dossier-grid">
+                  <select id="dossier-fraud" name="fraud_type" value={dossier.fraudType} onChange={(e) => setDossier({ ...dossier, fraudType: e.target.value })}>
+                    <option value="ATM Cash-Out / Card Fraud">ATM Cash-Out / Card Fraud</option>
+                    <option value="Card Skimming / Shimming">Card Skimming / Shimming</option>
+                    <option value="Card Swapping / Shoulder Surfing">Card Swapping / Shoulder Surfing</option>
+                    <option value="Mule Account Withdrawal">Mule Account Withdrawal</option>
+                  </select>
+                  <button className="button button-primary button-compact" type="submit" disabled={savingDossier}>
+                    {savingDossier ? <LoaderCircle size={14} className="spin" /> : <BadgeCheck size={14} />} Save Case Dossier
+                  </button>
+                </div>
+              </form>
             )}
           </section>
 
@@ -1142,6 +1210,21 @@ function SecurityCenter({ onToast }: { onToast: (toast: Toast) => void }) {
           <span>{manifestResult.verified ? `Payload SHA-256: ${manifestResult.payloadSha256}` : manifestResult.reason}</span>
         </div>
       )}
+    </section>
+
+    <section className="panel security-tool-panel">
+      <SectionTitle
+        title="Indian Law Enforcement &amp; Enterprise Compliance Matrix"
+        detail="BSA 2023 Sec. 63 admissibility, DPDP Act 2023 redaction, RBI zero-cloud boundary &amp; non-AGPL ONNX SBOM."
+        action={<a className="button button-outline button-compact" href="/api/security/compliance-report.json" download><Download size={14} /> Compliance JSON</a>}
+      />
+      <div className="compliance-pills">
+        <span className="compliance-pill"><BadgeCheck size={14} /> BSA Sec. 63 Cert Export</span>
+        <span className="compliance-pill"><ShieldCheck size={14} /> DPDP Bystander Redaction</span>
+        <span className="compliance-pill"><LockKeyhole size={14} /> 127.0.0.1 Zero-Cloud Boundary</span>
+        <span className="compliance-pill"><Fingerprint size={14} /> Dual SHA-256 + HMAC-SHA256</span>
+        <span className="compliance-pill"><CheckCircle2 size={14} /> Apache-2.0 / MIT AI Models (No AGPL)</span>
+      </div>
     </section>
 
     <div className="security-disclaimer"><LockKeyhole size={15} /> This local security layer is not a certified police deployment. Keep evidence on an encrypted host volume and maintain externally signed checkpoints.</div>
@@ -1594,7 +1677,7 @@ function Review({ analysisId, analysisSummary, onOpenSearch, onToast, onRefresh 
   const alerts = record?.result?.alerts || [];
 
   return <>
-    <div className="review-context-bar"><div className="context-icon"><FileVideo2 size={18} /></div><div><strong>{active?.clipName || 'Loading clip record…'}</strong><span>{active?.caseRef ? `${active.caseRef} · ` : ''}{active?.transactionRef || 'No transaction reference'} · {active?.timeMode === 'absolute' ? 'Bank timestamp' : 'Clip-relative time'} {active?.transactionTime}</span></div><div className="context-window"><Clock3 size={15} /> ±{active?.windowSeconds || 0}s window</div><StatusBadge status={record?.status || active?.status || 'running'} />{record?.status === 'completed' && <><a className="button button-outline button-compact" href={`/api/evidence/${record.id}/manifest.json`} download><FileCode2 size={15} /> Manifest JSON</a><a className="button button-outline button-compact evidence-download" href={`/api/evidence/${record.id}.pdf`} download><Download size={15} /> Evidence PDF</a></>}</div>
+    <div className="review-context-bar"><div className="context-icon"><FileVideo2 size={18} /></div><div><strong>{active?.clipName || 'Loading clip record…'}</strong><span>{active?.caseRef ? `${active.caseRef} · ` : ''}{active?.transactionRef || 'No transaction reference'} · {active?.timeMode === 'absolute' ? 'Bank timestamp' : 'Clip-relative time'} {active?.transactionTime}</span></div><div className="context-window"><Clock3 size={15} /> ±{active?.windowSeconds || 0}s window</div><StatusBadge status={record?.status || active?.status || 'running'} />{record?.status === 'completed' && <><a className="button button-outline button-compact" href={`/api/evidence/${record.id}/manifest.json`} download><FileCode2 size={15} /> Manifest</a><a className="button button-outline button-compact" href={`/api/evidence/${record.id}/bsa63.pdf`} download><BadgeCheck size={15} /> BSA Sec 63</a><a className="button button-outline button-compact evidence-download" href={`/api/evidence/${record.id}.pdf`} download><Download size={15} /> PDF</a><a className="button button-primary button-compact" href={`/api/evidence/${record.id}/bundle.zip`} download><HardDrive size={15} /> Case Bundle (.zip)</a></>}</div>
     {record?.status === 'running' && <div className="processing-banner"><LoaderCircle size={18} className="spin" /><div><strong>Reviewing the transaction window locally</strong><span>Detecting people, checking occlusion/shoulder-surfing, and indexing SFace 128-D embeddings.</span></div><span className="process-time">ANALYSIS RUNNING</span></div>}
     {record?.status === 'failed' && <div className="error-banner"><AlertCircle size={18} /><div><strong>Analysis could not complete</strong><span>{record.error}</span></div></div>}
     {alerts.length > 0 && (

@@ -193,6 +193,17 @@ def run() -> None:
             assert "not identity verification" in search.json()["notice"]
             pdf = client.get(f"/api/evidence/{analysis_id}.pdf")
             assert pdf.status_code == 200 and pdf.content.startswith(b"%PDF")
+            assert client.get(f"/api/evidence/{analysis_id}.pdf").content.startswith(b"%PDF")
+            assert client.get(f"/api/evidence/{analysis_id}/bsa63.pdf").content.startswith(b"%PDF")
+            bundle_res = client.get(f"/api/evidence/{analysis_id}/bundle.zip")
+            assert bundle_res.status_code == 200
+            import io, zipfile
+            with zipfile.ZipFile(io.BytesIO(bundle_res.content)) as zf:
+                names = set(zf.namelist())
+                assert {"evidence-sheet.pdf", "bsa-section-63-certificate.pdf", "evidence-manifest.json", "audit-trail.json"}.issubset(names), names
+            assert client.get("/api/dossier").status_code == 200
+            assert client.put("/api/dossier", headers={"X-CSRF-Token": csrf}, json={"fir_number": "FIR-01/2026", "ncrp_ack": "1930-998811", "loss_inr": 45000}).status_code == 200
+            assert client.get("/api/security/compliance-report.json").status_code == 200
             enhanced_res = client.get(f"/api/candidates/{candidate_ids[0]}/enhanced")
             assert enhanced_res.status_code == 200 and enhanced_res.headers.get("x-forensic-enhancement")
             redacted_res = client.get(f"/api/candidates/{candidate_ids[0]}/frame-redacted")
