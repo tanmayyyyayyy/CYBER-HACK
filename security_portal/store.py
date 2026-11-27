@@ -247,6 +247,8 @@ def init_db() -> None:
 def remove_demo_accounts() -> None:
     with connect() as db:
         db.execute("DELETE FROM portal_otp_challenges")
+        db.execute("UPDATE portal_users SET verification_status='pending' WHERE aadhaar_verified=1")
+        db.execute("UPDATE portal_users SET aadhaar_verified=0, aadhaar_masked='', aadhaar_ref_hash=''")
         db.execute("""UPDATE atm_assignments SET
             guard_user_id = CASE WHEN guard_user_id IN ('guard-101','guard-102') THEN '' ELSE guard_user_id END,
             admin_user_id = CASE WHEN admin_user_id = 'atm-admin-201' THEN '' ELSE admin_user_id END,

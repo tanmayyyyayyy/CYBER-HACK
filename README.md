@@ -2,11 +2,15 @@
 
 **Drishti** is a local-first video analytics and forensic evidence review workstation built for **Rajasthan Police Cyber Security Hackathon 2026 — PS04 (ATM CCTV Suspect Face Extraction for Card & ATM Fraud Investigation)**.
 
+> **Project status: hackathon demonstrator.** It is not approved for operational surveillance, handling real citizen footage, dispatching guards, or submitting generated files as statutory evidence. Demo outputs, face matches, alerts, and certificates require independent validation and authorized human review.
+
 It ingests ATM CCTV footage (including proprietary DVR/NVR exports), links clips to bank transaction timestamps or Electronic Journal (EJ) logs, tracks people inside the ATM keypad/cash-slot zone, ranks the clearest candidate face frames with occlusion/quality flags, searches across clips via **SFace 128-D** deep face embeddings, and exports **BSA Section 63 Certificates**, **Sealed PDF Evidence Sheets**, **DPDP Bystander-Redacted Frames**, and **Offline Forensic Case Bundles (`.zip`)**.
 
 Alongside the primary PS04 clip-forensic workflow, Drishti includes a sandboxed **Local Real-Time AI Console** (`Real-time AI`) capable of monitoring local clips, USB cameras, or Android IP Webcams—automatically collecting face evidence & suspicious incident snapshots into SQLite and alerting when the same person returns repeatedly.
 
 > **PS04 scope:** The interface is Rajasthan Police-inspired and has no official affiliation. Video processing and evidence storage run locally. Optional blockchain verification contacts the configured node. The on-chain record contains a manifest fingerprint and format marker. Quality scores and watchlist alerts require human review.
+
+Cryptographic hashes and local HMAC seals detect some changes but are not independent signatures or immutable chain-of-custody records. Generating a BSA Section 63 certificate PDF or a DPDP-labeled redacted frame does not establish legal compliance. The portal's siren is browser audio; there is no real SMS, phone, police, or guard dispatch integration.
 
 ---
 

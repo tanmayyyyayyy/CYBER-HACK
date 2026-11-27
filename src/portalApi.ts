@@ -13,8 +13,6 @@ export type PortalUser = {
   dutyTiming: string;
   emergencyContact: string;
   verificationStatus: 'pending' | 'verified' | 'suspended';
-  aadhaarVerified: boolean;
-  aadhaarMasked: string;
   status: 'active' | 'disabled';
   createdAt: string;
 };

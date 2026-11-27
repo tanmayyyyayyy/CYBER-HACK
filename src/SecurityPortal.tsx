@@ -301,7 +301,7 @@ function PortalWorkspace({ user, onSignOut, toast, onToast }: {
                 <ShieldAlert size={15} /><span>Escalation &amp; Siren</span>{activeCount > 0 && <small>{activeCount}</small>}
               </button>
               <button className={`nav-item ${tab === 'guards' ? 'nav-active' : ''}`} onClick={() => setTab('guards')}>
-                <UsersRound size={15} /><span>Guards &amp; eKYC</span><small>{guards.length}</small>
+                <UsersRound size={15} /><span>Guard Profiles</span><small>{guards.length}</small>
               </button>
               {canManage && (
                 <button className={`nav-item ${tab === 'routing' ? 'nav-active' : ''}`} onClick={() => setTab('routing')}>
@@ -447,8 +447,8 @@ function PortalWorkspace({ user, onSignOut, toast, onToast }: {
             <>
               <div className="page-heading">
                 <div>
-                  <h1>Guard Profiles &amp; Aadhaar-Style eKYC Verification</h1>
-                  <p>Minimum-data guard profiles: raw 12-digit Aadhaar numbers are never stored (only masked XXXX-XXXX-last4 + HMAC verification ref).</p>
+                  <h1>Guard Profiles &amp; Verification Status</h1>
+                  <p>Administrators manage the profile status. No Aadhaar collection or electronic identity verification is connected.</p>
                 </div>
                 {canManage && (
                   <button className="button button-primary button-compact" onClick={() => setNewGuardOpen(true)}>
@@ -536,6 +536,8 @@ function PortalWorkspace({ user, onSignOut, toast, onToast }: {
                     </div>
                     <button
                       className={`button button-compact ${r.enabled ? 'button-primary' : 'button-outline'}`}
+                      disabled={user.role !== 'super_admin'}
+                      title={user.role !== 'super_admin' ? 'Only the portal super admin can change global rules.' : undefined}
                       onClick={async () => {
                         try {
                           await portalApi.toggleRule(r.id, !r.enabled);

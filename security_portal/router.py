@@ -46,8 +46,6 @@ def _public_user(row) -> dict[str, Any]:
         "dutyTiming": row["duty_timing"],
         "emergencyContact": row["emergency_contact"],
         "verificationStatus": row["verification_status"],
-        "aadhaarVerified": bool(row["aadhaar_verified"]),
-        "aadhaarMasked": row["aadhaar_masked"],
         "status": row["status"],
         "createdAt": row["created_at"],
     }
@@ -154,7 +152,7 @@ class GuardCreateRequest(BaseModel):
     password: str = Field(min_length=12, max_length=128)
     address: str = Field(default="", max_length=200)
     pin_code: str = Field(default="", max_length=12)
-    assigned_atms: list[str] = Field(default_factory=list)
+    assigned_atms: list[str] = Field(default_factory=list, max_length=4)
     duty_timing: str = Field(default="08:00 - 20:00", max_length=60)
     emergency_contact: str = Field(default="", max_length=40)
 
@@ -279,16 +277,26 @@ def list_guards(request: Request) -> list[dict[str, Any]]:
     with store.connect() as db:
         if sess["user"]["role"] == "guard":
             rows = db.execute("SELECT * FROM portal_users WHERE id=?", (sess["user"]["id"],)).fetchall()
+        elif sess["user"]["role"] == "super_admin":
+            rows = db.execute("SELECT * FROM portal_users ORDER BY role, employee_id").fetchall()
         else:
             rows = db.execute("SELECT * FROM portal_users ORDER BY role, employee_id").fetchall()
+            rows = [r for r in rows if set(store.json_load(r["assigned_atms_json"], [])) & set(sess["user"]["assignedAtms"])]
     return [_public_user(r) for r in rows]
 
 
 @router.post("/guards", status_code=201)
 def create_guard(payload: GuardCreateRequest, request: Request) -> dict[str, Any]:
     sess = _require_auth(request, {"atm_admin", "super_admin"})
-    if payload.role in {"govt_official", "super_admin"} and sess["user"]["role"] != "super_admin":
-        raise HTTPException(403, "Only Super Admin can register Government Official or Super Admin accounts.")
+    requested_atms = set(payload.assigned_atms)
+    known_atms = {"ATM-01", "ATM-02", "ATM-03", "ATM-04"}
+    if not requested_atms <= known_atms:
+        raise HTTPException(422, "Choose only configured ATM identifiers.")
+    if sess["user"]["role"] == "atm_admin":
+        if payload.role != "guard":
+            raise HTTPException(403, "ATM Admins may only create guard accounts.")
+        if not requested_atms <= set(sess["user"]["assignedAtms"]):
+            raise HTTPException(403, "A guard cannot be assigned outside your ATM scope.")
     uid = uuid.uuid4().hex
     stamp = _iso()
     with store.connect() as db:
@@ -321,6 +329,15 @@ def update_guard(user_id: str, payload: GuardUpdateRequest, request: Request) ->
         row = db.execute("SELECT * FROM portal_users WHERE id=?", (user_id,)).fetchone()
         if not row:
             raise HTTPException(404, "Guard / Official record not found.")
+        if sess["user"]["role"] == "atm_admin":
+            own_atms = set(sess["user"]["assignedAtms"])
+            target_atms = set(store.json_load(row["assigned_atms_json"], []))
+            if row["role"] != "guard" or not (target_atms & own_atms):
+                raise HTTPException(403, "ATM Admins may manage only guards assigned to their ATMs.")
+            if payload.assigned_atms is not None and not set(payload.assigned_atms) <= own_atms:
+                raise HTTPException(403, "A guard cannot be assigned outside your ATM scope.")
+        if payload.assigned_atms is not None and not set(payload.assigned_atms) <= {"ATM-01", "ATM-02", "ATM-03", "ATM-04"}:
+            raise HTTPException(422, "Choose only configured ATM identifiers.")
         updates: dict[str, Any] = {}
         for key, col in [
             ("display_name", "display_name"),
@@ -349,10 +366,12 @@ def update_guard(user_id: str, payload: GuardUpdateRequest, request: Request) ->
 
 @router.get("/assignments")
 def list_assignments(request: Request) -> list[dict[str, Any]]:
-    _require_auth(request)
+    user = _require_auth(request)["user"]
     with store.connect() as db:
         rows = db.execute("SELECT * FROM atm_assignments ORDER BY atm_id").fetchall()
         users = {r["id"]: r["display_name"] for r in db.execute("SELECT id, display_name FROM portal_users").fetchall()}
+    if user["role"] != "super_admin":
+        rows = [r for r in rows if r["atm_id"] in user["assignedAtms"]]
     return [
         {
             "atmId": r["atm_id"],
@@ -376,9 +395,22 @@ def list_assignments(request: Request) -> list[dict[str, Any]]:
 
 @router.put("/assignments/{atm_id}")
 def update_assignment(atm_id: str, payload: AssignmentUpdateRequest, request: Request) -> dict[str, Any]:
-    _require_auth(request, {"atm_admin", "super_admin"})
+    user = _require_auth(request, {"atm_admin", "super_admin"})["user"]
+    if user["role"] != "super_admin" and atm_id not in user["assignedAtms"]:
+        raise HTTPException(403, "ATM Admins may only update assignments for their own ATMs.")
     stamp = _iso()
     with store.connect() as db:
+        expected = {
+            "guard_user_id": "guard", "admin_user_id": "atm_admin",
+            "govt_user_id": "govt_official", "backup_govt_user_id": "govt_official",
+        }
+        for field_name, role in expected.items():
+            value = getattr(payload, field_name)
+            if not value:
+                continue
+            assigned = db.execute("SELECT role, assigned_atms_json FROM portal_users WHERE id=? AND status='active'", (value,)).fetchone()
+            if not assigned or assigned["role"] != role or atm_id not in store.json_load(assigned["assigned_atms_json"], []):
+                raise HTTPException(422, f"The selected {role.replace('_', ' ')} is not active and assigned to {atm_id}.")
         cur = db.execute(
             """UPDATE atm_assignments
                SET guard_user_id=?, admin_user_id=?, govt_user_id=?, backup_govt_user_id=?,
@@ -416,7 +448,7 @@ def list_rules(request: Request) -> list[dict[str, Any]]:
 
 @router.patch("/rules/{rule_id}")
 def toggle_rule(rule_id: str, payload: RuleToggleRequest, request: Request) -> dict[str, Any]:
-    _require_auth(request, {"atm_admin", "super_admin"})
+    _require_auth(request, {"super_admin"})
     with store.connect() as db:
         cur = db.execute("UPDATE security_rules SET enabled=?, updated_at=? WHERE id=?", (int(payload.enabled), _iso(), rule_id))
         if cur.rowcount == 0:
@@ -522,11 +554,17 @@ def bridge_ingest_event(payload: BridgeEventRequest, request: Request) -> dict[s
 
 def _can_view_alert(user: dict, row: Any) -> bool:
     role = user["role"]
-    if row["incident_kind"] == "stream.camera_tamper" and role != "super_admin":
+    if role == "super_admin":
+        return True
+    if row["atm_id"] not in user["assignedAtms"]:
+        return False
+    if role == "guard":
+        return row["assigned_guard_id"] == user["id"] or row["atm_id"] in user["assignedAtms"]
+    if row["incident_kind"] == "stream.camera_tamper":
         fields = {"guard": ("assigned_guard_id",), "atm_admin": ("assigned_admin_id",),
                   "govt_official": ("assigned_govt_id", "backup_govt_id")}
         return any(user["id"] == row[field] for field in fields.get(role, ()))
-    return role != "guard" or row["assigned_guard_id"] == user["id"] or row["atm_id"] in user["assignedAtms"]
+    return role in {"atm_admin", "govt_official"}
 
 
 @router.get("/alerts/{alert_id}/snapshot")
@@ -597,7 +635,7 @@ def list_alerts_and_observations(request: Request) -> dict[str, Any]:
 
     observations = []
     for o in obs_rows:
-        if user["role"] == "guard" and o["atm_id"] not in user["assignedAtms"]:
+        if user["role"] != "super_admin" and o["atm_id"] not in user["assignedAtms"]:
             continue
         observations.append(
             {
@@ -616,7 +654,11 @@ def list_alerts_and_observations(request: Request) -> dict[str, Any]:
 
 @router.post("/alerts/simulate")
 def simulate_two_stage_breach(payload: SimulateBreachRequest, request: Request) -> dict[str, Any]:
-    _require_auth(request, {"guard", "atm_admin", "govt_official", "super_admin"})
+    user = _require_auth(request, {"guard", "atm_admin", "govt_official", "super_admin"})["user"]
+    if payload.atm_id not in {"ATM-01", "ATM-02", "ATM-03", "ATM-04"}:
+        raise HTTPException(422, "Choose only configured ATM identifiers.")
+    if user["role"] != "super_admin" and payload.atm_id not in user["assignedAtms"]:
+        raise HTTPException(403, "You may only simulate an alert for an assigned ATM.")
     cam_id = payload.atm_id.replace("ATM-", "CAM-")
     if payload.with_prior_helmet:
         ingest_bridge_payload(
@@ -654,7 +696,7 @@ def acknowledge_alert(alert_id: str, request: Request) -> dict[str, Any]:
     stamp = _iso()
     with store.connect() as db:
         row = db.execute("SELECT * FROM escalation_alerts WHERE id=?", (alert_id,)).fetchone()
-        if not row or (row["incident_kind"] == "stream.camera_tamper" and not _can_view_alert(user, row)):
+        if not row or not _can_view_alert(user, row):
             raise HTTPException(404, "Alert not found.")
         if row["status"] == "resolved":
             raise HTTPException(409, "Alert is already resolved.")
@@ -674,7 +716,7 @@ def escalate_alert_manual(alert_id: str, request: Request) -> dict[str, Any]:
     stamp = _iso()
     with store.connect() as db:
         row = db.execute("SELECT * FROM escalation_alerts WHERE id=?", (alert_id,)).fetchone()
-        if not row or (row["incident_kind"] == "stream.camera_tamper" and not _can_view_alert(user, row)):
+        if not row or not _can_view_alert(user, row):
             raise HTTPException(404, "Alert not found.")
         if row["status"] == "resolved":
             raise HTTPException(409, "Resolved alerts cannot be escalated.")
@@ -701,7 +743,7 @@ def resolve_alert(alert_id: str, request: Request) -> dict[str, Any]:
     stamp = _iso()
     with store.connect() as db:
         row = db.execute("SELECT * FROM escalation_alerts WHERE id=?", (alert_id,)).fetchone()
-        if not row or (row["incident_kind"] == "stream.camera_tamper" and not _can_view_alert(user, row)):
+        if not row or not _can_view_alert(user, row):
             raise HTTPException(404, "Alert not found.")
         tl = store.json_load(row["timeline_json"], [])
         tl.append({"at": stamp, "tier": "Resolved", "note": f"Incident closed by {user['displayName']} ({user['role']})"})

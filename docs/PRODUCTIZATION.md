@@ -2,30 +2,38 @@
 
 Drishti's product wedge is **transaction-time-first evidence triage**: narrow hours of CCTV to a bank-supplied time window, surface reviewable face frames with transparent quality signals, preserve local evidence fingerprints, and export a human-reviewed evidence sheet. It does not identify a person from external databases.
 
+## Current status
+
+This is a **hackathon demonstrator**, not an operational security product. Use synthetic or explicitly authorized sample footage for presentations. It has no external guard/police dispatch, no validated eKYC, no managed identity provider, no independent evidence timestamp/signature service, and no independent accuracy or security assessment. A generated certificate, hash, or report is not proof of legal admissibility or statutory compliance.
+
 ## What works today
 
 - Local MP4/AVI/MOV/MKV/WMV/FLV/MPEG/MPG upload, clip metadata, and four named ATM evidence channels.
 - Clip-relative and bank-time-to-clip-time linking with configurable analysis windows.
 - Local person/face detection, basic track continuity, ranked face crops, review labels and notes.
-- Cross-clip *appearance histogram* search with explicit non-identity language.
+- Cross-clip SFace 128-D similarity search when its model is installed, with a histogram fallback; it does not query external identity records.
 - Source and normalized-file SHA-256, audit hash-chain verification, timestamped system events, reports, and a PDF evidence sheet.
 - Local FastAPI/OpenAPI endpoints and a one-machine React client.
 - Local administrator/investigator accounts, pending-account approval, account disable, eight-hour HTTP-only sessions, and CSRF protection for write requests.
 - Admin-only Security Center checks SQLite integrity/foreign keys, audit links, private file modes, denied sign-ins, and network boundary; full evidence rehash sweeps are recorded and alert on mismatch.
 - AES-256-GCM, passphrase-derived SQLite metadata snapshots with an integrity-checked restore utility; portable backups do not contain the large video/candidate media tree.
 - Security Portal accounts are no longer demo-seeded at startup. The first portal super admin must be provisioned locally with `python scripts/provision_portal_admin.py`; subsequent accounts are created by an authenticated super admin.
+- On startup, legacy fixed demo accounts and simulated OTP challenges are removed; any prior sandbox eKYC markers are reset to pending and masked Aadhaar fields are cleared. Review assignments after upgrading.
 - The portal no longer exposes simulated SMS/Aadhaar OTP verification. Portal login throttles by hashed account identifier and client address. `DRISHTI_COOKIE_SECURE=1` enables Secure cookies when deployed behind HTTPS; MFA and a real identity-verification provider remain future integrations.
 - Network cameras require an explicit private CIDR allowlist in `DRISHTI_CAMERA_NETWORKS`. HTTP redirects are revalidated, system proxy settings are bypassed, and camera status output strips credentials and URL query strings. RTSP is disabled because its redirect behavior cannot be constrained through the current reader. HTTP camera transport is not encrypted; use a protected camera network.
+- Security Portal reads and alert actions are scoped to assigned ATMs; ATM Admin user management is limited to their assigned guard accounts. Case-level permissions are not implemented in the main evidence workspace, where approved investigators share one local vault.
+- Uploads have a 500 MB per-file limit, a serialized ingest path, and a configurable 20 GiB local evidence-directory cap. This is a workstation guardrail, not a multi-tenant storage quota or resource-isolated media sandbox.
 
 ## Before any operational pilot
 
-1. **Identity and authorization:** the local portal supports workspace-level administrator/investigator access only. Integrate the Cell's approved identity provider and enforce case-level roles for intake, review, export, and administration before operational use. Keep the local pilot bound to loopback.
+1. **Identity and authorization:** the local portal supports local password accounts and ATM-assignment scoping; the main evidence workspace has no case-level isolation. Integrate the Cell's approved OIDC identity provider, MFA, and least-privilege case roles for intake, review, export, and administration before operational use. Keep the local pilot bound to loopback.
 2. **Evidence custody:** record verified operator identity, collection source, collection/transfer timestamps, purpose, device/camera details, and every custody transfer. Export an externally signed audit checkpoint to independently controlled storage. Current SQLite hash chaining detects edits and broken links but is not immutable or a complete chain-of-custody record.
 3. **Privacy and retention:** define purpose limitation, case retention/deletion, redaction, access review, legal authority, breach response, and backup encryption with the Cell's legal/security teams before ingesting real footage.
 4. **Validation:** obtain authorized, representative ATM clips and transaction journals; define acceptance metrics with investigators; measure detection recall, false candidate rate, frame-quality ranking utility, timestamp tolerance, throughput, and performance across camera/lighting conditions. A synthetic smoke test is a software-path check, not an accuracy benchmark.
-5. **Operations:** move from SQLite and an in-process single-worker queue to an approved database and durable job queue for multi-user installations; implement health metrics, storage quotas, retention jobs, recovery-tested backups, signed releases, dependency/model SBOM and vulnerability management. App-level encryption-at-rest, centralized key custody, MFA and remote incident alerting are not implemented in this local pilot; require approved host encryption and identity controls.
-6. **Integrations:** implement an approved evidence-management/DVR export adapter. Keep the first connector file-based and auditable; the upstream God's Eye View city streams are not ATM evidence and are not connected.
-7. **Licensing:** preserve the included model notices; complete a legal review of all software, model, and training-data licenses before redistribution or commercial use.
+5. **Operations:** move from SQLite and an in-process single-worker queue to an approved database and durable job queue for multi-user installations; add retention jobs, recovery-tested backups, signed releases, a software/model SBOM, and vulnerability management. App-level encryption-at-rest, centralized key custody, and remote incident alerting are not implemented; require host encryption and approved identity controls.
+6. **Security assurance:** use [OWASP ASVS 5.0](https://asvs.owasp.org/) as a documented verification baseline, run an independent threat-model-led assessment, and remediate findings before connecting operational networks or making public security claims.
+7. **Integrations:** implement an approved evidence-management/DVR export adapter. Keep the first connector file-based and auditable; the upstream God's Eye View city streams are not ATM evidence and are not connected.
+8. **Licensing:** preserve the included model notices; complete a legal review of all software, model, and training-data licenses before redistribution or commercial use.
 
 ## Integration contract
 

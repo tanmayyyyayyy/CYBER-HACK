@@ -265,11 +265,12 @@ def run() -> None:
             portal_store.init_db()
             with portal_store.connect() as db:
                 db.execute(
-                    """INSERT INTO portal_users(id,employee_id,email,display_name,mobile,role,password_hash,created_at)
-                       VALUES(?,?,?,?,?,?,?,?)""",
+                    """INSERT INTO portal_users(id,employee_id,email,display_name,mobile,role,password_hash,assigned_atms_json,created_at)
+                       VALUES(?,?,?,?,?,?,?,?,?)""",
                     ("guard-test", "EMP-TEST-1", "guard@test.invalid", "Test Guard", "0000000000", "guard",
-                     portal_store.hash_secret("test-passphrase-2026"), portal_store.now_iso()),
+                     portal_store.hash_secret("test-passphrase-2026"), '["ATM-01"]', portal_store.now_iso()),
                 )
+                db.execute("UPDATE atm_assignments SET guard_user_id='guard-test' WHERE atm_id='ATM-01'")
             assert client.post("/sec-api/auth/demo-seed").status_code == 404
             # Bridge authentication check
             assert client.post("/sec-api/bridge/event", json={
