@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import collections
 import hashlib
 import json
@@ -17,6 +18,11 @@ from typing import Any, Generator
 
 import cv2
 import numpy as np
+
+try:
+    cv2.setNumThreads(2)
+except Exception:
+    pass
 
 from backend import analysis, store
 
@@ -150,6 +156,8 @@ class LocalSurveillanceManager:
         self._lock = threading.RLock()
         self._evidence_lock = threading.RLock()
         self._evidence_cache: list[dict[str, Any]] | None = None
+        self._watchlist_cache: list[dict[str, Any]] = []
+        self._watchlist_ts: float = 0.0
         self._running = False
         self._thread: threading.Thread | None = None
         self._face_detector = None
@@ -576,6 +584,9 @@ class LocalSurveillanceManager:
         return None, "Slot empty (add footage or IP Webcam)", False
 
     def _load_watchlist(self) -> list[dict[str, Any]]:
+        now = time.monotonic()
+        if self._watchlist_ts > 0.0 and (now - self._watchlist_ts) < 2.5:
+            return self._watchlist_cache
         try:
             with store.connect() as db:
                 rows = db.execute("SELECT id, label, case_ref, embedding_json FROM case_watchlist").fetchall()
@@ -584,9 +595,11 @@ class LocalSurveillanceManager:
                 vec = store.json_load(r["embedding_json"], [])
                 if vec:
                     out.append({"id": r["id"], "label": r["label"], "caseRef": r["case_ref"], "vec": vec})
+            self._watchlist_cache = out
+            self._watchlist_ts = now
             return out
         except Exception:
-            return []
+            return self._watchlist_cache
 
     def _annotate_frame(self, state: StreamState, frame: np.ndarray, detect: bool = True) -> np.ndarray:
         raw = cv2.resize(frame, (640, 360), interpolation=cv2.INTER_AREA)
@@ -1011,9 +1024,10 @@ class LocalSurveillanceManager:
                             caps[stream_id].release()
                             caps.pop(stream_id, None)
                             active_sources.pop(stream_id, None)
+                        if state.status != "no_source" or not state.latest_jpeg:
+                            state.latest_jpeg = self._placeholder_jpeg(state, "Slot available · Add Footage or IP Webcam")
                         state.status = "no_source"
                         state.source_label = src_label
-                        state.latest_jpeg = self._placeholder_jpeg(state, "Slot available · Add Footage or IP Webcam")
                         continue
                     src_key = str(src_val)
                     if active_sources.get(stream_id) != src_key or stream_id not in caps or not caps[stream_id].isOpened():
@@ -1059,7 +1073,7 @@ class LocalSurveillanceManager:
                             state.last_frame_at = _now_iso()
                             elapsed = max(0.15, time.monotonic() - loop_start)
                             state.fps = round(min(15.0, 1.0 / elapsed), 1)
-                sleep_for = max(0.03, 0.14 - (time.monotonic() - loop_start))
+                sleep_for = max(0.08, 0.40 - (time.monotonic() - loop_start))
                 time.sleep(sleep_for)
         finally:
             for cap in caps.values():
@@ -1088,13 +1102,16 @@ class LocalSurveillanceManager:
         state = self._streams.get(stream_id)
         if not state:
             raise KeyError(stream_id)
+        with self._lock:
+            if state.latest_jpeg:
+                return state.latest_jpeg
         src_val, src_label, is_live = self._resolve_source(state)
         state.source_label = src_label
         if src_val is None:
-            return self._placeholder_jpeg(state, "Slot available · Add Footage or IP Webcam")
-        with self._lock:
-            if state.latest_jpeg and self.is_running():
-                return state.latest_jpeg
+            jpg_bytes = self._placeholder_jpeg(state, "Slot available · Add Footage or IP Webcam")
+            with self._lock:
+                state.latest_jpeg = jpg_bytes
+            return jpg_bytes
         if is_live and not self.is_running():
             return self._placeholder_jpeg(state, f"Ready: {src_label}. Click Start Live AI.")
         state.source_path = str(src_val)
@@ -1120,12 +1137,12 @@ class LocalSurveillanceManager:
         with self._lock:
             return state.latest_face_jpeg or None
 
-    def mjpeg_generator(self, stream_id: str) -> Generator[bytes, None, None]:
+    async def async_mjpeg_generator(self, stream_id: str):
         self.start()
         while True:
             frame = self.snapshot_jpeg(stream_id)
             yield b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + frame + b"\r\n"
-            time.sleep(0.14)
+            await asyncio.sleep(0.18)
             if not self.is_running():
                 break
 

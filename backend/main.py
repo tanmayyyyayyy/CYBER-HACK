@@ -1505,7 +1505,7 @@ def stream_mjpeg(stream_id: str) -> StreamingResponse:
     if stream_id not in {item["id"] for item in streams.STREAM_CATALOG}:
         raise HTTPException(404, "Unknown stream ID.")
     return StreamingResponse(
-        streams.manager.mjpeg_generator(stream_id),
+        streams.manager.async_mjpeg_generator(stream_id),
         media_type="multipart/x-mixed-replace; boundary=frame",
         headers={"Cache-Control": "no-store"},
     )

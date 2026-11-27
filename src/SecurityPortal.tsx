@@ -277,8 +277,11 @@ function PortalWorkspace({ user, onUserUpdate, onSignOut, toast, onToast }: {
   const [ekycOtp, setEkycOtp] = useState('');
   const [newGuardOpen, setNewGuardOpen] = useState(false);
   const lastSirenAlertRef = useRef<string>('');
+  const pollBusyRef = useRef(false);
 
   const loadAll = useCallback(async () => {
+    if (pollBusyRef.current) return;
+    pollBusyRef.current = true;
     try {
       const [alertRes, guardList, assignList, ruleList] = await Promise.all([
         portalApi.alerts(),
@@ -293,6 +296,8 @@ function PortalWorkspace({ user, onUserUpdate, onSignOut, toast, onToast }: {
       setRules(ruleList);
     } catch (e) {
       onToast({ kind: 'error', message: e instanceof Error ? e.message : 'Sync failed.' });
+    } finally {
+      pollBusyRef.current = false;
     }
   }, [onToast]);
 

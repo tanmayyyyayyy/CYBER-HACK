@@ -87,32 +87,39 @@ function Workspace({ user, onSignOut }: { user: AuthUser; onSignOut: () => Promi
   const [uploadCameraId, setUploadCameraId] = useState('ATM-01');
   const [replaceClipId, setReplaceClipId] = useState('');
   const [slotModal, setSlotModal] = useState<SlotModalTarget>(null);
+  const refreshInFlight = useRef(false);
 
   const refresh = useCallback(async (quiet = true) => {
+    if (quiet && refreshInFlight.current) return;
+    refreshInFlight.current = true;
     if (!quiet) setRefreshing(true);
-    const [
-      healthResult, clipsResult, camerasResult, analysesResult,
-      eventsResult, auditResult, auditIntegrityResult, reportsResult,
-      streamsResult, watchlistResult,
-    ] = await Promise.allSettled([
-      api.health(), api.clips(), api.cameras(), api.analyses(),
-      api.events(), api.audit(), api.auditIntegrity(), api.reports(),
-      api.streams(), api.watchlist(),
-    ]);
-    if (healthResult.status === 'fulfilled') setHealth(healthResult.value);
-    if (clipsResult.status === 'fulfilled') setClips(clipsResult.value);
-    if (camerasResult.status === 'fulfilled') setCameras(camerasResult.value);
-    if (analysesResult.status === 'fulfilled') setAnalyses(analysesResult.value);
-    if (eventsResult.status === 'fulfilled') setEvents(eventsResult.value);
-    if (auditResult.status === 'fulfilled') setAudit(auditResult.value);
-    if (auditIntegrityResult.status === 'fulfilled') setAuditIntegrity(auditIntegrityResult.value);
-    if (reportsResult.status === 'fulfilled') setReportData(reportsResult.value);
-    if (streamsResult.status === 'fulfilled') setStreamsState(streamsResult.value);
-    if (watchlistResult.status === 'fulfilled') setWatchlist(watchlistResult.value);
-    if ([healthResult, clipsResult, camerasResult, analysesResult].some((result) => result.status === 'rejected')) {
-      if (!quiet) setToast({ kind: 'error', message: 'Could not reach the local API. Start the local server and retry.' });
+    try {
+      const [
+        healthResult, clipsResult, camerasResult, analysesResult,
+        eventsResult, auditResult, auditIntegrityResult, reportsResult,
+        streamsResult, watchlistResult,
+      ] = await Promise.allSettled([
+        api.health(), api.clips(), api.cameras(), api.analyses(),
+        api.events(), api.audit(), api.auditIntegrity(), api.reports(),
+        api.streams(), api.watchlist(),
+      ]);
+      if (healthResult.status === 'fulfilled') setHealth(healthResult.value);
+      if (clipsResult.status === 'fulfilled') setClips(clipsResult.value);
+      if (camerasResult.status === 'fulfilled') setCameras(camerasResult.value);
+      if (analysesResult.status === 'fulfilled') setAnalyses(analysesResult.value);
+      if (eventsResult.status === 'fulfilled') setEvents(eventsResult.value);
+      if (auditResult.status === 'fulfilled') setAudit(auditResult.value);
+      if (auditIntegrityResult.status === 'fulfilled') setAuditIntegrity(auditIntegrityResult.value);
+      if (reportsResult.status === 'fulfilled') setReportData(reportsResult.value);
+      if (streamsResult.status === 'fulfilled') setStreamsState(streamsResult.value);
+      if (watchlistResult.status === 'fulfilled') setWatchlist(watchlistResult.value);
+      if ([healthResult, clipsResult, camerasResult, analysesResult].some((result) => result.status === 'rejected')) {
+        if (!quiet) setToast({ kind: 'error', message: 'Could not reach the local API. Start the local server and retry.' });
+      }
+    } finally {
+      refreshInFlight.current = false;
+      setRefreshing(false);
     }
-    setRefreshing(false);
   }, []);
 
   useEffect(() => {
@@ -421,11 +428,15 @@ function SurveillanceWall({ state, events, watchlist, onRefresh, onOpenSlotModal
   const [busy, setBusy] = useState(false);
   const [capturing, setCapturing] = useState('');
   const [tick, setTick] = useState(0);
+  const [frameTick, setFrameTick] = useState(0);
   const [camTarget, setCamTarget] = useState('CAM-03');
   const [ipUrl, setIpUrl] = useState('');
   const [camSaving, setCamSaving] = useState(false);
+  const pollInFlight = useRef(false);
 
   const loadDetections = useCallback(async () => {
+    if (pollInFlight.current) return;
+    pollInFlight.current = true;
     try {
       const [detList, dbEvidence, incList] = await Promise.all([api.streamDetections(), api.liveEvidence(), api.liveIncidents()]);
       setDetections(detList);
@@ -433,6 +444,8 @@ function SurveillanceWall({ state, events, watchlist, onRefresh, onOpenSlotModal
       setIncidents(incList);
     } catch {
       /* ignore transient poll error */
+    } finally {
+      pollInFlight.current = false;
     }
   }, []);
 
@@ -443,8 +456,11 @@ function SurveillanceWall({ state, events, watchlist, onRefresh, onOpenSlotModal
       onRefresh();
       setTick((v) => v + 1);
     }, 3000);
-    return () => window.clearInterval(timer);
-  }, [loadDetections, onRefresh]);
+    const frameTimer = window.setInterval(() => {
+      if (state?.running) setFrameTick((v) => v + 1);
+    }, 360);
+    return () => { window.clearInterval(timer); window.clearInterval(frameTimer); };
+  }, [loadDetections, onRefresh, state?.running]);
 
   const promoteLive = async (subject: LiveEvidenceSubject) => {
     try {
@@ -615,7 +631,7 @@ function SurveillanceWall({ state, events, watchlist, onRefresh, onOpenSlotModal
               <div className="stream-viewport">
                 {stream.sourceAvailable ? (
                   <img
-                    src={running ? stream.mjpegUrl : `${stream.snapshotUrl}?t=${tick}`}
+                    src={running ? `${stream.snapshotUrl}?f=${frameTick}` : `${stream.snapshotUrl}?t=${tick}`}
                     alt={`${stream.id} ${stream.name} surveillance feed`}
                   />
                 ) : (
@@ -877,7 +893,11 @@ function CaseIntel({ watchlist, onReview, onOpenSurveillance, onRefresh, onToast
   onToast: (toast: Toast) => void;
 }) {
   const [journey, setJourney] = useState<CaseJourney | null>(null);
-  const [dossier, setDossier] = useState<CaseDossier | null>(null);
+  const [dossier, setDossier] = useState<CaseDossier>({
+    id: 'ACTIVE', firNumber: '', ncrpAck: '', policeStation: 'Cyber Crime Police Station',
+    ioName: '', ioBadge: '', atmId: '', bankName: '', fraudType: 'ATM Cash-Out / Card Fraud',
+    lossInr: 0, notes: '', updatedAt: '',
+  });
   const [savingDossier, setSavingDossier] = useState(false);
   const [loading, setLoading] = useState(true);
 
@@ -1515,7 +1535,7 @@ function CameraWall({ cameras, onAddOrChange, onDeleteClip, compact = false }: {
       const clip = slot?.clips?.[0];
       return <article className={`camera-tile ${clip ? 'camera-has-clip' : ''}`} key={item.id}>
         <div className="camera-video-area">
-          {clip ? clip.previewReady ? <video src={clip.videoUrl} poster={clip.posterUrl} muted controls playsInline preload="metadata" aria-label={`${item.id} ${item.label} local recording`} /> : <div className="camera-poster-preview"><img src={clip.posterUrl} alt={`${item.id} ${item.label} video poster`} /><span>Playback needs FFmpeg H.264 conversion</span></div> : <div className="camera-empty"><Camera size={20} /><span>No local clip assigned</span><button onClick={() => onAddOrChange(item.id)}><Plus size={14} /> Add footage / IP cam</button></div>}
+          {clip ? clip.previewReady ? <video src={clip.videoUrl} poster={clip.posterUrl} muted controls playsInline preload="none" aria-label={`${item.id} ${item.label} local recording`} /> : <div className="camera-poster-preview"><img src={clip.posterUrl} alt={`${item.id} ${item.label} video poster`} /><span>Playback needs FFmpeg H.264 conversion</span></div> : <div className="camera-empty"><Camera size={20} /><span>No local clip assigned</span><button onClick={() => onAddOrChange(item.id)}><Plus size={14} /> Add footage / IP cam</button></div>}
           <span className={`camera-state ${clip ? 'camera-recorded' : ''}`}><i />{clip ? (clip.previewReady ? 'RECORDED' : 'POSTER ONLY') : 'EMPTY'}</span>
         </div>
         <div className="camera-meta">

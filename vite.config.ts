@@ -7,6 +7,9 @@ export default defineConfig({
     host: '127.0.0.1',
     port: 5174,
     strictPort: true,
+    watch: {
+      ignored: ['**/backend/**', '**/security_portal/**', '**/models/**', '**/demo_feeds/**', '**/.venv/**', '**/dist/**', '**/scripts/**'],
+    },
     headers: {
       'Content-Security-Policy': "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self' ws://127.0.0.1:5174; font-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'",
       'X-Content-Type-Options': 'nosniff',
