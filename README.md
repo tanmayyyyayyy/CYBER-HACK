@@ -41,12 +41,13 @@ Alongside the primary PS04 clip-forensic workflow, Drishti includes a sandboxed 
 ### 5. Local Real-Time AI Console, Auto DB Evidence & Repeat-Person Alerting ([`backend/streams.py`](backend/streams.py))
 - **Sandboxed 4-Stream Control Room (`Real-time AI`):** Auto-starts on server boot across `CAM-01`–`CAM-04` (`2` local demo feeds + `2` open slots for video files, Android **IP Webcam** URLs like `http://<phone-ip>:8080/video`, `rtsp://...`, or Mac/USB camera indices `0–4`), plus `120`-frame rolling-buffer clip capture. Zero live bank CCTV connection.
 - **Automatic SQLite Evidence & Repeat-Person Alerting (`/api/live-evidence`):** Faces detected on clean raw frames (`>= 0.56` normalized SFace threshold) are automatically cropped, SHA-256 hashed, and stored under sequential IDs (`SUB-001`, `SUB-002`, ...) in `live_identities` + `live_sightings`. If the same person re-appears (`>= 8s` absence or `>= 2s` camera switch), Drishti increments their visit count, saves a fresh crop, and triggers a **`stream.repeat_person`** priority alert with 1-click **Arm** to the local watchlist.
-- **Auto-Captured Suspicious Incident Snapshots (`/api/live-incidents`):** Real-time AI monitors for `stream.suspect_match` (armed watchlist), `stream.repeat_person`, `stream.shoulder_surfing`, `stream.occlusion_detected` (mask/helmet/cap), `stream.tamper_skimming` (unoccupied keypad/slot shift), and `stream.loitering`, automatically saving full annotated scene JPGs + SHA-256 hashes into SQLite (`live_incidents`) with lightbox preview and 1-click **Incident PDF** export (`/api/live-incidents/{id}.pdf`).
+- **Incident evidence (`/api/live-incidents`):** Review hashed scene snapshots from live monitoring, including camera interference (`stream.camera_tamper`), ATM-zone dwell (`stream.atm_zone_dwell`), and guard welfare cues (`stream.guard_welfare_check`). Dwell and welfare cues are local review alerts.
+- **Camera interference:** A sustained obscured view, abrupt framing change, strong localized glare, or loss of a previously active feed can trigger an alert. The incident includes a timestamped snapshot and a recent face crop when available. The crop is context for review. It does not identify who caused the interference.
 
 ### 6. Case Intel, 1930 / FIR Dossier & Enterprise Compliance (`Case intel`, `Security`)
 - **Indian Police / Bank Fraud Dossier (`/api/dossier`):** Capture FIR/GD Ref, NCRP `1930` Acknowledgement ID, Police Station/Unit, Investigating Officer Name & Badge, Bank / White-Label ATM Operator, Terminal ID, Fraud Typology, and Loss Amount (INR ₹) — without storing raw PANs or PINs — stamped automatically onto every exported report and certificate.
 - **Multi-Camera Suspect Journey (`/api/cases/journey`):** Correlates SFace cross-camera appearances across `ATM-01..ATM-04` (filtering out same-camera self-links), live repeat visitors, and audit readiness.
-- **Enterprise Compliance Matrix (`/api/security/compliance-report.json`):** Exports a signed compliance attestation across **BSA Sec. 63**, **DPDP Act 2023**, **Zero-Cloud Loopback Baseline**, and **Non-AGPL OpenCV Zoo SBOM**.
+- **Enterprise Compliance Matrix (`/api/security/compliance-report.json`):** Exports a signed inventory of evidence export, privacy and local security controls alongside the model inventory. It records whether the optional Ultralytics runtime is installed or enabled.
 
 ### 7. Separate Security, Guard Management & Priority Escalation Portal (`/security-portal` · `127.0.0.1:8100`)
 Drishti AI integrates over authenticated loopback REST APIs (`POST /sec-api/bridge/event` via `X-Drishti-Service-Key`) with a **separate Security & Escalation Portal** (`security_portal/` + `/security-portal` UI):
@@ -55,6 +56,7 @@ Drishti AI integrates over authenticated loopback REST APIs (`POST /sec-api/brid
   - **Rule 2 (`RULE_2_ATM_TAMPER_OR_FORCE` — Immediate Escalation):** Only if machine shaking, prying, structural panel tampering, torch/cutter flash, or sustained concealed manipulation occurs does the engine escalate (`Prior Rule 1 + Rule 2 Breach`) into a Priority-1 alert.
 - **3-Tier Priority Escalation + Web Audio Siren:**
   `ATM Camera (Drishti) → Priority 1: Assigned On-Duty Guard (Siren + SLA Countdown) → Priority 2: ATM Admin / Owner → Priority 3: Backup Govt Security Official`.
+- **Camera-interference delivery:** The assigned guard, ATM administrator, and police liaison can see these alerts in their portal accounts. The portal uses the ATM assignment to route the alert and verifies the snapshot hash before serving it. Production dispatch, SMS, and automatic selection of a police station are outside this local workflow.
 - **Guard Management, 4-Role RBAC & Aadhaar-Style eKYC OTP Sandbox:** Separate role logins for `Guard`, `ATM Admin / Owner`, `Government / Security Official`, and `Super Admin`. Guard profiles hold Name, Employee/Guard ID, Mobile, Address, PIN Code, Assigned ATMs, Duty Timings, Emergency Contact, Verification Status, and a simulated Aadhaar OTP verification workflow that never stores raw 12-digit Aadhaar numbers (retaining only masked `XXXX-XXXX-last4` + HMAC ref).
 
 ---
@@ -130,7 +132,7 @@ npm.cmd run build
 
 For the blockchain demo, use `npm.cmd run blockchain:demo` to start the app on port `8001` with the local chain.
 
-## Local AI Models (Pinned, Non-AGPL & Checksummed)
+## Default OpenCV Zoo models
 
 | Model | Purpose | SHA-256 |
 | :--- | :--- | :--- |
@@ -171,6 +173,32 @@ CYBER-HACK/
 ```
 
 ---
+
+## Covered-face evidence handoff
+
+Open a completed analysis and use **Face visibility and case handoff**. New analyses report sampled frames with a detected person and no face detection. Use the source player to review a timestamp, save a visibility observation, and optionally link an incident from the same camera channel. The signed manifest records the transaction offset, observation timestamp, and operator account. **Case bundle with original footage** includes the original bytes after a SHA-256 check and any linked snapshots that still match their recorded fingerprints. Earlier analyses can accept observations. Rerun them to collect visibility sampling counts.
+
+## Optional YOLOv8 and ByteTrack monitoring
+
+The default OpenCV Zoo models remain available. To enable the optional Ultralytics models on Windows, run these commands from the project folder. Review the [Ultralytics license](https://www.ultralytics.com/license) before distributing an integration that uses its software or weights.
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r requirements-vision.txt
+.\.venv\Scripts\python.exe scripts/download_models.py --advanced-vision
+$env:DRISHTI_ADVANCED_VISION = '1'
+npm.cmd run build
+npm.cmd run blockchain:demo
+```
+
+YOLOv8n detects people and ByteTrack keeps a separate tracking session for each camera or clip. YuNet and SFace still handle face evidence. On the live wall, ATM-zone dwell generates a review alert after 90 seconds by default. A recorded feed uses clip time for the timer. Dwell and welfare observations stay in the local alert log.
+
+To enable YOLOv8n-Pose welfare cues, set a guard zone for the installed camera and restart. This example shows the configuration format. Adjust each rectangle to the actual camera view. Coordinates are normalized `[left, top, right, bottom]`.
+
+```powershell
+$env:DRISHTI_CAMERA_ZONES = '{"CAM-03":{"atm":[0.22,0.16,0.84,0.94],"guard":[0.02,0.15,0.20,0.95],"dwellSeconds":90,"welfareSeconds":30}}'
+```
+
+A welfare cue requires one tracked occupant, usable upper-body keypoints, and sustained head-down posture with limited movement. It cannot establish that someone is asleep. VideoMAE and SlowFast are not enabled. A CCTV action model needs annotated positive and ordinary-activity examples, plus separate validation footage. CVAT can label the action intervals and tracks for that work without putting annotation software on the live processing path.
 
 ## Blockchain evidence verification
 

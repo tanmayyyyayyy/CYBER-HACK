@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import argparse
 import ssl
 import hashlib
 import urllib.request
@@ -26,10 +27,21 @@ ASSETS = {
     ),
 }
 
+ADVANCED_ASSETS = {
+    "yolov8n.pt": ("https://github.com/ultralytics/assets/releases/download/v8.3.0/yolov8n.pt", 5_000_000,
+                   "f59b3d833e2ff32e194b5bb8e08d211dc7c5bdf144b90d2c8412c47ccfc83b36"),
+    "yolov8n-pose.pt": ("https://github.com/ultralytics/assets/releases/download/v8.3.0/yolov8n-pose.pt", 5_000_000,
+                        "c6fa93dd1ee4a2c18c900a45c1d864a1c6f7aba75d84f91648a30b7fb641d212"),
+}
+
 
 def main() -> int:
+    parser = argparse.ArgumentParser(description="Download checksum-pinned local model weights.")
+    parser.add_argument("--advanced-vision", action="store_true", help="Also download optional Ultralytics YOLOv8 weights.")
+    args = parser.parse_args()
     MODELS.mkdir(parents=True, exist_ok=True)
-    for name, (url, minimum_size, expected_sha256) in ASSETS.items():
+    assets = ASSETS | ADVANCED_ASSETS if args.advanced_vision else ASSETS
+    for name, (url, minimum_size, expected_sha256) in assets.items():
         target = MODELS / name
         if target.is_file() and target.stat().st_size >= minimum_size:
             digest = hashlib.sha256(target.read_bytes()).hexdigest()
