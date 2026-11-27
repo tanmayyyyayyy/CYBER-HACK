@@ -14,6 +14,7 @@ import {
   DatabaseBackup, EventItem, FaceVisibility, formatBytes, formatDuration, Health, JournalRow,
   LiveEvidenceResponse, LiveEvidenceSubject, LiveIncident, ReportsData, SecurityOverview, StreamDetection, StreamsResponse, WatchlistEntry,
 } from './api';
+import { Logo } from './Logo';
 
 type Page = 'surveillance' | 'desk' | 'intel' | 'library' | 'search' | 'reports' | 'audit' | 'review' | 'accounts' | 'security';
 type Toast = { kind: 'success' | 'error'; message: string } | null;
@@ -61,7 +62,7 @@ function App() {
   const signOut = async () => {
     try { await api.authLogout(); } finally { setUser(null); }
   };
-  if (authLoading) return <div className="auth-loading"><div className="brand-emblem"><ScanFace size={22} /></div><strong>DRISHTI</strong><span>Checking local access…</span></div>;
+  if (authLoading) return <div className="auth-loading"><Logo variant="lockup" /><span>Checking local access…</span></div>;
   if (!user) return <AuthPortal setupRequired={setupRequired} onAuthenticated={(account) => { setSetupRequired(false); setUser(account); }} />;
   return <Workspace user={user} onSignOut={signOut} />;
 }
@@ -213,7 +214,7 @@ function Workspace({ user, onSignOut }: { user: AuthUser; onSignOut: () => Promi
           <div className="top-utility-row">
             <div className="brand-lockup">
               <button className="icon-button menu-toggle" aria-label="Open navigation" onClick={() => setSmallNavOpen(true)}><Menu size={20} /></button>
-              <div className="brand-emblem" aria-hidden="true"><ScanFace size={21} strokeWidth={1.8} /></div>
+              <Logo decorative />
               <div><strong>DRISHTI · PS04 FORENSIC COMMAND</strong><span>ATM CCTV SUSPECT FACE EXTRACTION &amp; REAL-TIME LOCAL AI</span></div>
             </div>
 
@@ -244,7 +245,7 @@ function Workspace({ user, onSignOut }: { user: AuthUser; onSignOut: () => Promi
 
       <aside className={`mobile-drawer ${smallNavOpen ? 'mobile-drawer-open' : ''}`}>
         <div className="form-row">
-          <div className="brand-lockup"><div className="brand-emblem"><ScanFace size={18} /></div><div><strong>DRISHTI</strong><span>PS04 COMMAND</span></div></div>
+          <div className="brand-lockup"><Logo decorative /><div><strong>DRISHTI</strong><span>PS04 COMMAND</span></div></div>
           <button className="icon-button" aria-label="Close navigation" onClick={() => setSmallNavOpen(false)}><X size={18} /></button>
         </div>
         {navButtons}
@@ -1137,12 +1138,12 @@ function AuthPortal({ setupRequired, onAuthenticated }: { setupRequired: boolean
 
   return <main className="auth-screen">
     <div className="auth-side-art">
-      <div className="auth-brand"><div className="brand-emblem"><ScanFace size={22} /></div><div><strong>DRISHTI</strong><span>CYBER CELL FORENSIC SUITE</span></div></div>
+      <div className="auth-brand"><Logo variant="lockup" /><span>CYBER CELL FORENSIC SUITE</span></div>
       <div className="auth-art-copy"><span className="auth-kicker"><ShieldCheck size={15} /> RAJASTHAN POLICE PS04 PILOT</span><h1>Careful review.<br /><em>Clear evidence.</em></h1><p>Transaction-linked ATM suspect face extraction, 128-D local embeddings, and 4-stream surveillance analytics.</p></div>
       <div className="auth-art-foot"><LockKeyhole size={15} /> Evidence, models, and cryptographic seals stay offline on this device.</div>
     </div>
     <section className="auth-panel">
-      <div className="auth-mobile-brand"><div className="brand-emblem"><ScanFace size={22} /></div><strong>DRISHTI</strong></div>
+      <div className="auth-mobile-brand"><Logo variant="lockup" /></div>
       <div className="auth-card">
         <span className="auth-kicker">{setupRequired && mode === 'signup' ? 'INITIAL ADMINISTRATOR SETUP' : 'AUTHORISED ACCESS'}</span>
         <h2>{mode === 'signup' ? (setupRequired ? 'Secure this workspace' : 'Request an account') : 'Welcome back'}</h2>
