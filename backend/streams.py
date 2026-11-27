@@ -3,9 +3,12 @@ from __future__ import annotations
 import collections
 import hashlib
 import json
+import os
 import re
 import threading
 import time
+import urllib.error
+import urllib.request
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -16,6 +19,34 @@ import cv2
 import numpy as np
 
 from backend import analysis, store
+
+
+def _dispatch_security_bridge(payload: dict[str, Any]) -> None:
+    """Send Stage-1 Rule observations & Stage-2 Alerts to the separate Security Portal API."""
+    def _worker() -> None:
+        from security_portal import store as sec_store
+        url = os.environ.get("DRISHTI_SECURITY_PORTAL_URL", "http://127.0.0.1:8100/sec-api/bridge/event").strip()
+        body = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(
+            url,
+            data=body,
+            headers={
+                "Content-Type": "application/json",
+                "X-Drishti-Service-Key": sec_store.bridge_service_key(),
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=1.5):
+                return
+        except (urllib.error.URLError, TimeoutError, OSError):
+            try:
+                from security_portal import router as sec_router
+                sec_router.ingest_bridge_payload(sec_router.BridgeEventRequest(**payload))
+            except Exception:
+                pass
+
+    threading.Thread(target=_worker, daemon=True).start()
 
 
 def _now_iso() -> str:
@@ -95,6 +126,14 @@ class StreamState:
     last_evidence_ts: float = 0.0
     baseline_keypad_edges: float | None = None
     tamper_streak: int = 0
+    prev_gray: np.ndarray | None = None
+    shake_streak: int = 0
+    rule1_active_until: float = 0.0
+    rule1_code: str = ""
+    rule1_note: str = ""
+    security_stage: str = "clear"
+    last_bridge_obs_ts: float = 0.0
+    last_bridge_esc_ts: float = 0.0
     last_incident_ts: dict[str, float] = field(default_factory=dict)
     ring_buffer: collections.deque[np.ndarray] = field(default_factory=lambda: collections.deque(maxlen=120))
 
@@ -462,6 +501,11 @@ class LocalSurveillanceManager:
                 state.last_evidence_ts = 0.0
                 state.baseline_keypad_edges = None
                 state.tamper_streak = 0
+                state.prev_gray = None
+                state.shake_streak = 0
+                state.rule1_active_until = 0.0
+                state.rule1_note = ""
+                state.security_stage = "clear"
                 state.previous_boxes.clear()
                 state.track_start_ts.clear()
             return self.status()
@@ -478,6 +522,11 @@ class LocalSurveillanceManager:
                 state.repeat_hit = ""
                 state.repeat_hit_ts = 0.0
                 state.last_evidence_ts = 0.0
+                state.prev_gray = None
+                state.shake_streak = 0
+                state.rule1_active_until = 0.0
+                state.rule1_note = ""
+                state.security_stage = "clear"
             return self.status()
 
         is_index = cleaned.isdigit() and 0 <= int(cleaned) <= 4
@@ -586,9 +635,28 @@ class LocalSurveillanceManager:
             if len(in_zone) >= 2:
                 alert_kind = "stream.shoulder_surfing"
                 alert_msg = f"Shoulder-surfing risk on {state.meta['id']}: {len(in_zone)} persons in ATM zone"
-            elif max_dwell >= 10.0 and tracks:
-                alert_kind = "stream.loitering"
-                alert_msg = f"Extended dwell ({max_dwell:.0f}s) detected on {state.meta['id']}"
+
+            # Violent machine shaking, prying, or torch/cutter glare detection in ATM zone (Rule 2 trigger)
+            zone_gray = cv2.cvtColor(raw[zy1:zy2, zx1:zx2], cv2.COLOR_BGR2GRAY)
+            if in_zone and state.prev_gray is not None and state.prev_gray.shape == zone_gray.shape:
+                diff = cv2.absdiff(zone_gray, state.prev_gray)
+                high_motion_ratio = float((diff > 26).mean())
+                flash_ratio = float((zone_gray > 238).mean())
+                if high_motion_ratio >= 0.16 or (flash_ratio >= 0.025 and high_motion_ratio >= 0.05):
+                    state.shake_streak += 1
+                else:
+                    state.shake_streak = max(0, state.shake_streak - 1)
+                if state.shake_streak >= 3 and not alert_kind:
+                    alert_kind = "stream.atm_breach_alert"
+                    prefix = "Rule 1 (Concealment) + Rule 2: " if state.rule1_active_until > now_mono else "Rule 2: "
+                    alert_msg = f"{prefix}Suspicious ATM shaking / tampering / prying at {state.meta['channelId']}"
+            elif not in_zone:
+                state.shake_streak = 0
+            state.prev_gray = zone_gray.copy()
+
+            if state.rule1_active_until > now_mono and max_dwell >= 8.0 and in_zone and not alert_kind:
+                alert_kind = "stream.atm_breach_alert"
+                alert_msg = f"Rule 1 + Rule 2: Masked/helmeted subject performing sustained ATM manipulation on {state.meta['channelId']}"
 
             # Card-slot / keypad ROI structural shift heuristic when terminal zone is empty
             if not in_zone:
@@ -603,7 +671,7 @@ class LocalSurveillanceManager:
                         state.tamper_streak += 1
                         if state.tamper_streak >= 4 and not alert_kind:
                             alert_kind = "stream.tamper_skimming"
-                            alert_msg = f"Keypad / card-slot surface anomaly on {state.meta['id']} (skimming check)"
+                            alert_msg = f"Keypad / card-slot structural tampering detected on {state.meta['channelId']}"
                     else:
                         state.tamper_streak = 0
                         state.baseline_keypad_edges = state.baseline_keypad_edges * 0.92 + edges * 0.08
@@ -699,12 +767,25 @@ class LocalSurveillanceManager:
                             state.repeat_hit_ts = now_mono
                         elif has_occ:
                             occ_tag = next(f for f in q_flags if f.startswith("possible "))
-                            f_color = (56, 128, 235)
+                            f_color = (56, 168, 240)
                             sub_tag = f" · {live_info['subjectCode']} ({live_info['appearanceCount']}x)" if live_info else ""
-                            flabel = f"FACE {int(q_score)}% · {occ_tag.upper()}{sub_tag}"
-                            if not alert_kind:
-                                alert_kind = "stream.occlusion_detected"
-                                alert_msg = f"{occ_tag.title()} flagged on {state.meta['id']} (Q {int(q_score)}/100)"
+                            flabel = f"RULE 1 OBSERVED · {occ_tag.upper()}{sub_tag}"
+                            # Two-stage rule: record face concealment silently and monitor without triggering an alarm yet!
+                            state.rule1_active_until = now_mono + 30.0
+                            state.rule1_code = "RULE_1_CONCEALMENT"
+                            state.rule1_note = f"Rule 1: {occ_tag.title()} inside {state.meta['channelId']} (monitoring silently)"
+                            if now_mono - state.last_bridge_obs_ts >= 12.0:
+                                state.last_bridge_obs_ts = now_mono
+                                _dispatch_security_bridge({
+                                    "camera_id": state.meta["id"],
+                                    "atm_id": state.meta["channelId"],
+                                    "stage": "observe",
+                                    "rule_code": "RULE_1_CONCEALMENT",
+                                    "incident_kind": "rule1.concealment_entry",
+                                    "severity": "info",
+                                    "summary": state.rule1_note,
+                                    "subject_code": detected_subject_code,
+                                })
                         else:
                             f_color = (90, 198, 240)
                             sub_tag = f" · {live_info['subjectCode']} ({live_info['appearanceCount']}x)" if live_info else ""
@@ -724,6 +805,27 @@ class LocalSurveillanceManager:
                     state.latest_face_flags = best_face_flags
                     state.latest_face_at = _now_iso()
 
+            # Also catch full motorcycle helmet / obscured face when person is inside ATM zone >= 1.8s with zero visible faces
+            if in_zone and face_hits == 0 and max_dwell >= 1.8 and state.rule1_active_until <= now_mono:
+                state.rule1_active_until = now_mono + 30.0
+                state.rule1_code = "RULE_1_CONCEALMENT"
+                state.rule1_note = f"Rule 1: Helmet / obscured face inside {state.meta['channelId']} (monitoring silently)"
+                if now_mono - state.last_bridge_obs_ts >= 12.0:
+                    state.last_bridge_obs_ts = now_mono
+                    _dispatch_security_bridge({
+                        "camera_id": state.meta["id"],
+                        "atm_id": state.meta["channelId"],
+                        "stage": "observe",
+                        "rule_code": "RULE_1_CONCEALMENT",
+                        "incident_kind": "rule1.helmet_entry",
+                        "severity": "info",
+                        "summary": state.rule1_note,
+                        "subject_code": detected_subject_code,
+                    })
+
+            if state.rule1_active_until <= now_mono and not alert_kind:
+                state.rule1_note = ""
+
             if state.repeat_hit and (now_mono - state.repeat_hit_ts > 8.0):
                 state.repeat_hit = ""
 
@@ -731,6 +833,11 @@ class LocalSurveillanceManager:
             state.face_count = face_hits
             state.active_tracks = len(state.previous_boxes)
             state.watchlist_hit = watchlist_match_label
+            state.security_stage = (
+                "alert_escalated"
+                if (alert_kind or state.repeat_hit)
+                else ("observing_rule1" if state.rule1_active_until > now_mono else "clear")
+            )
             state.alert_state = "alert" if (alert_kind or state.repeat_hit) else ("active" if (tracks or face_hits) else "clear")
             if alert_msg:
                 state.last_alert = alert_msg
@@ -807,12 +914,15 @@ class LocalSurveillanceManager:
 
         if alert_kind or state.repeat_hit:
             is_crit = alert_kind == "stream.suspect_match" or bool(state.repeat_hit)
-            bar_color = (182, 42, 42) if alert_kind == "stream.suspect_match" else ((36, 98, 212) if is_crit else (165, 62, 46))
+            bar_color = (182, 42, 42) if alert_kind in ("stream.suspect_match", "stream.atm_breach_alert") else ((36, 98, 212) if is_crit else (165, 62, 46))
             bar_text = alert_msg if alert_kind else f"REPEAT: {state.repeat_hit}"
             cv2.rectangle(canvas, (0, h - 26), (w - 94, h), bar_color, -1)
             cv2.putText(canvas, f"ALERT: {bar_text[:58]}", (8, h - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (255, 255, 255), 1, cv2.LINE_AA)
+        elif state.security_stage == "observing_rule1":
+            cv2.rectangle(canvas, (0, h - 26), (w - 94, h), (186, 128, 34), -1)
+            cv2.putText(canvas, "RULE 1 MONITORING: Helmet/Mask logged (no alarm)", (8, h - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.40, (255, 255, 255), 1, cv2.LINE_AA)
 
-        # 4) Auto-save full-scene evidence snapshot into SQLite `live_incidents` on suspicious alerts
+        # 4) Auto-save full-scene evidence snapshot into SQLite `live_incidents` AND escalate to Security Portal API!
         if detect and alert_kind:
             last_inc = state.last_incident_ts.get(alert_kind, 0.0)
             if now_mono - last_inc >= 6.0:
@@ -829,7 +939,7 @@ class LocalSurveillanceManager:
                         inc_path.chmod(0o600)
                     except OSError:
                         pass
-                    sev = "critical" if alert_kind in ("stream.suspect_match", "stream.repeat_person") else "warning"
+                    sev = "critical" if alert_kind in ("stream.suspect_match", "stream.repeat_person", "stream.atm_breach_alert", "stream.tamper_skimming") else "warning"
                     try:
                         with store.connect() as db:
                             db.execute(
@@ -850,6 +960,21 @@ class LocalSurveillanceManager:
                             )
                     except Exception:
                         pass
+                    if now_mono - state.last_bridge_esc_ts >= 6.0:
+                        state.last_bridge_esc_ts = now_mono
+                        _dispatch_security_bridge({
+                            "camera_id": state.meta["id"],
+                            "atm_id": state.meta["channelId"],
+                            "stage": "escalate",
+                            "rule_code": "RULE_2_ATM_TAMPER_OR_FORCE",
+                            "prior_rule_code": state.rule1_code if state.rule1_active_until > now_mono else "",
+                            "incident_kind": alert_kind,
+                            "severity": sev,
+                            "summary": f"Suspicious activity detected at {state.meta['channelId']}: {alert_msg}",
+                            "subject_code": detected_subject_code,
+                            "snapshot_url": f"/api/live-incidents/{inc_id}/image",
+                            "snapshot_sha256": digest,
+                        })
         return canvas
 
     def _placeholder_jpeg(self, state: StreamState, message: str) -> bytes:
@@ -1026,6 +1151,8 @@ class LocalSurveillanceManager:
                     "fps": state.fps,
                     "framesProcessed": state.frames_processed,
                     "alertState": state.alert_state,
+                    "securityStage": state.security_stage,
+                    "rule1Note": state.rule1_note,
                     "lastAlert": state.last_alert,
                     "watchlistHit": state.watchlist_hit,
                     "repeatHit": state.repeat_hit,

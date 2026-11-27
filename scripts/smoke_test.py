@@ -255,6 +255,45 @@ def run() -> None:
             assert client.delete(f"/api/live-evidence/{live_id}", headers={"X-CSRF-Token": csrf}).status_code == 200
             assert client.post("/api/live-evidence/clear", headers={"X-CSRF-Token": csrf}).status_code == 200
 
+            # Separate Security Portal & Two-Stage Escalation verification (Rule 1 Silent -> Rule 2 Breach -> P1->P2->P3)
+            from security_portal import store as portal_store
+            assert client.get("/sec-api/health").status_code == 200
+            seed_res = client.post("/sec-api/auth/demo-seed")
+            assert seed_res.status_code == 200
+            # Bridge authentication check
+            assert client.post("/sec-api/bridge/event", json={
+                "camera_id": "CAM-01", "atm_id": "ATM-01", "stage": "observe",
+                "rule_code": "RULE_1_CONCEALMENT", "incident_kind": "rule1.helmet_entry", "summary": "Test",
+            }).status_code == 401
+            svc_headers = {"X-Drishti-Service-Key": portal_store.bridge_service_key()}
+            obs_res = client.post("/sec-api/bridge/event", headers=svc_headers, json={
+                "camera_id": "CAM-01", "atm_id": "ATM-01", "stage": "observe",
+                "rule_code": "RULE_1_CONCEALMENT", "incident_kind": "rule1.helmet_entry",
+                "summary": "Person wearing helmet entered ATM-01",
+            })
+            assert obs_res.status_code == 200 and obs_res.json()["siren"] is False
+            esc_res = client.post("/sec-api/bridge/event", headers=svc_headers, json={
+                "camera_id": "CAM-01", "atm_id": "ATM-01", "stage": "escalate",
+                "rule_code": "RULE_2_ATM_TAMPER_OR_FORCE", "incident_kind": "stream.atm_breach_alert",
+                "severity": "critical", "summary": "Suspicious machine shaking/tampering at ATM-01",
+            })
+            assert esc_res.status_code == 200 and esc_res.json()["priority"] == 1 and esc_res.json()["siren"] is True
+            alert_id = esc_res.json()["alertId"]
+            # Guard OTP login + RBAC + Aadhaar sandbox verification
+            otp_req = client.post("/sec-api/auth/otp/request", json={"identifier": "EMP-GRD-101"}).json()
+            guard_login = client.post("/sec-api/auth/otp/verify", json={"challenge_id": otp_req["challengeId"], "otp": otp_req["demoOtpHint"]})
+            assert guard_login.status_code == 200
+            p_csrf = guard_login.json()["csrfToken"]
+            assert len(client.get("/sec-api/guards").json()) == 1  # Guard sees only own profile
+            assert client.post("/sec-api/rules/rule-1-concealment", headers={"X-Portal-CSRF": p_csrf}, json={"enabled": False}).status_code in (403, 405)
+            ekyc_req = client.post("/sec-api/guards/guard-101/aadhaar-otp/request", headers={"X-Portal-CSRF": p_csrf}, json={"aadhaar_input": "999988884821"}).json()
+            assert ekyc_req["aadhaarMasked"] == "XXXX-XXXX-4821"
+            ekyc_ver = client.post("/sec-api/guards/guard-101/aadhaar-otp/verify", headers={"X-Portal-CSRF": p_csrf}, json={"challenge_id": ekyc_req["challengeId"], "otp": ekyc_req["demoOtpHint"]})
+            assert ekyc_ver.status_code == 200 and ekyc_ver.json()["aadhaarVerified"] is True
+            assert client.post(f"/sec-api/alerts/{alert_id}/escalate", headers={"X-Portal-CSRF": p_csrf}).json()["priority"] == 2
+            assert client.post(f"/sec-api/alerts/{alert_id}/acknowledge", headers={"X-Portal-CSRF": p_csrf}).json()["status"] == "acknowledged"
+            assert client.post(f"/sec-api/alerts/{alert_id}/resolve", headers={"X-Portal-CSRF": p_csrf}).json()["status"] == "resolved"
+
             journal_res = client.post(
                 "/api/journal/match",
                 headers={"X-CSRF-Token": csrf},

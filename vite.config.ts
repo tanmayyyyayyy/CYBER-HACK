@@ -15,7 +15,10 @@ export default defineConfig({
       'Permissions-Policy': 'camera=(), microphone=(), geolocation=()',
       'Cross-Origin-Resource-Policy': 'same-origin',
     },
-    proxy: { '/api': 'http://127.0.0.1:8000' },
+    proxy: {
+      '/api': 'http://127.0.0.1:8000',
+      '/sec-api': 'http://127.0.0.1:8100',
+    },
   },
   preview: { host: '127.0.0.1', port: 4174, strictPort: true },
 });

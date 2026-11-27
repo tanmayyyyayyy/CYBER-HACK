@@ -108,6 +108,8 @@ export type SurveillanceStream = {
   fps: number;
   framesProcessed: number;
   alertState: 'clear' | 'active' | 'alert';
+  securityStage?: 'clear' | 'observing_rule1' | 'alert_escalated';
+  rule1Note?: string;
   lastAlert: string;
   watchlistHit?: string;
   repeatHit?: string;

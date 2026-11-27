@@ -47,6 +47,15 @@ Alongside the primary PS04 clip-forensic workflow, Drishti includes a sandboxed 
 - **Multi-Camera Suspect Journey (`/api/cases/journey`):** Correlates SFace cross-camera appearances across `ATM-01..ATM-04` (filtering out same-camera self-links), live repeat visitors, and audit readiness.
 - **Enterprise Compliance Matrix (`/api/security/compliance-report.json`):** Exports a signed compliance attestation across **BSA Sec. 63**, **DPDP Act 2023**, **Zero-Cloud Loopback Baseline**, and **Non-AGPL OpenCV Zoo SBOM**.
 
+### 7. Separate Security, Guard Management & Priority Escalation Portal (`/security-portal` · `127.0.0.1:8100`)
+Drishti AI integrates over authenticated loopback REST APIs (`POST /sec-api/bridge/event` via `X-Drishti-Service-Key`) with a **separate Security & Escalation Portal** (`security_portal/` + `/security-portal` UI):
+- **Context-First Two-Stage Security Rules:**
+  - **Rule 1 (`RULE_1_CONCEALMENT` — Observe Silently):** Helmet, mask, cap, or obscured face entry inside the ATM is recorded quietly in `rule_observations` (`RULE 1 MONITORING`) **without triggering any alarm/siren**.
+  - **Rule 2 (`RULE_2_ATM_TAMPER_OR_FORCE` — Immediate Escalation):** Only if machine shaking, prying, structural panel tampering, torch/cutter flash, or sustained concealed manipulation occurs does the engine escalate (`Prior Rule 1 + Rule 2 Breach`) into a Priority-1 alert.
+- **3-Tier Priority Escalation + Web Audio Siren:**
+  `ATM Camera (Drishti) → Priority 1: Assigned On-Duty Guard (Siren + SLA Countdown) → Priority 2: ATM Admin / Owner → Priority 3: Backup Govt Security Official`.
+- **Guard Management, 4-Role RBAC & Aadhaar-Style eKYC OTP Sandbox:** Separate role logins for `Guard`, `ATM Admin / Owner`, `Government / Security Official`, and `Super Admin`. Guard profiles hold Name, Employee/Guard ID, Mobile, Address, PIN Code, Assigned ATMs, Duty Timings, Emergency Contact, Verification Status, and a simulated Aadhaar OTP verification workflow that never stores raw 12-digit Aadhaar numbers (retaining only masked `XXXX-XXXX-last4` + HMAC ref).
+
 ---
 
 ## Navigation Tabs (UI Workspace)

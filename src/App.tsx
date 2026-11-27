@@ -213,6 +213,10 @@ function Workspace({ user, onSignOut }: { user: AuthUser; onSignOut: () => Promi
             <div className="top-utility-right">
               <div className="local-status"><span className={`status-orb ${health ? 'status-ready' : 'status-loading'}`} /><span>{health ? 'OFFLINE / LOCAL' : 'CONNECTING'}</span></div>
               <span className="topbar-divider" />
+              <a className="button button-outline button-compact" href="/security-portal" target="_blank" rel="noopener noreferrer" title="Open Separate Guard & Escalation Security Portal">
+                <ShieldAlert size={14} /> Security Portal ↗
+              </a>
+              <span className="topbar-divider" />
               <div className="topbar-clock"><span>JAIPUR, RJ</span><strong>{new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: false })}</strong></div>
               <span className="topbar-divider" />
               <button className="icon-button notification-button" aria-label="Recent alerts" onClick={() => setPage('audit')}><Bell size={18} />{warningCount > 0 && <i />}</button>
@@ -630,7 +634,7 @@ function SurveillanceWall({ state, events, watchlist, onRefresh, onOpenSlotModal
                 )}
                 <span className={`stream-badge ${stream.alertState === 'alert' ? 'stream-badge-alert' : running && stream.sourceAvailable ? 'stream-badge-live' : ''}`}>
                   <i />
-                  {stream.watchlistHit ? `WATCHLIST · ${stream.id}` : stream.repeatHit ? `REPEAT · ${stream.id}` : stream.alertState === 'alert' ? `ALERT · ${stream.id}` : !stream.sourceAvailable ? `OPEN · ${stream.id}` : running ? `LIVE AI · ${stream.id}` : `STANDBY · ${stream.id}`}
+                  {stream.watchlistHit ? `WATCHLIST · ${stream.id}` : stream.repeatHit ? `REPEAT · ${stream.id}` : stream.alertState === 'alert' ? `ALERT · ${stream.id}` : stream.securityStage === 'observing_rule1' ? `RULE 1 OBS · ${stream.id}` : !stream.sourceAvailable ? `OPEN · ${stream.id}` : running ? `LIVE AI · ${stream.id}` : `STANDBY · ${stream.id}`}
                 </span>
                 {stream.sourceAvailable && (
                   <span className="stream-count-pill">

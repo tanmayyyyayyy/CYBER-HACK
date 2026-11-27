@@ -34,6 +34,7 @@ from reportlab.pdfgen import canvas
 
 from backend import analysis, auth, forensics, store, streams
 from backend.security import encrypt_snapshot, sign_manifest, verify_manifest
+from security_portal import router as security_portal_router
 
 APP_NAME = "Drishti Forensic Review"
 ALLOWED_EXTENSIONS = {
@@ -80,6 +81,7 @@ async def lifespan(_application: FastAPI):
 
 
 app = FastAPI(title=APP_NAME, version="0.2.0", docs_url="/api/docs", redoc_url=None, lifespan=lifespan)
+app.include_router(security_portal_router.router)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=LOCAL_ORIGINS,
