@@ -305,7 +305,7 @@ function Workspace({ user, onSignOut }: { user: AuthUser; onSignOut: () => Promi
               onDelete={(clip) => void deleteSlotClip(clip)}
             />
           )}
-          {page === 'review' && <Review analysisId={selectedAnalysisId} analysisSummary={selectedAnalysis} onOpenSearch={openSearch} onToast={setToast} onRefresh={refresh} />}
+          {page === 'review' && <Review analysisId={selectedAnalysisId} analysisSummary={selectedAnalysis} canAnchor={user.role === 'administrator'} onOpenSearch={openSearch} onToast={setToast} onRefresh={refresh} />}
           {page === 'search' && <SearchWorkspace analyses={analyses} candidateId={selectedCandidateId} onCandidateChange={setSelectedCandidateId} onReview={openReview} />}
           {page === 'reports' && <Reports data={reportData} analyses={analyses} events={events} />}
           {page === 'audit' && <Audit items={audit} events={events} integrity={auditIntegrity} />}
@@ -1136,7 +1136,7 @@ function SecurityCenter({ onToast }: { onToast: (toast: Toast) => void }) {
   const [working, setWorking] = useState<'check' | 'backup' | 'manifest' | ''>('');
   const [backupPassphrase, setBackupPassphrase] = useState('');
   const [manifestText, setManifestText] = useState('');
-  const [manifestResult, setManifestResult] = useState<{ verified: boolean; payloadSha256?: string; reason?: string } | null>(null);
+  const [manifestResult, setManifestResult] = useState<{ verified: boolean; blockchain: boolean; payloadSha256?: string; reason?: string } | null>(null);
   const [evidenceResult, setEvidenceResult] = useState<Awaited<ReturnType<typeof api.verifyAllEvidence>> | null>(null);
 
   const load = async () => {
@@ -1175,9 +1175,10 @@ function SecurityCenter({ onToast }: { onToast: (toast: Toast) => void }) {
     setManifestResult(null);
     try {
       const parsed = JSON.parse(manifestText);
-      const result = await api.verifyManifest(parsed);
-      setManifestResult(result);
-      onToast({ kind: result.verified ? 'success' : 'error', message: result.verified ? 'Evidence manifest HMAC-SHA256 seal verified.' : (result.reason || 'Manifest verification failed.') });
+      const blockchain = typeof parsed?.transactionHash === 'string' || typeof parsed?.chainId === 'string';
+      const result = blockchain ? await api.verifyBlockchainEvidence(parsed) : await api.verifyManifest(parsed);
+      setManifestResult({ ...result, blockchain });
+      onToast({ kind: result.verified ? 'success' : 'error', message: result.verified ? (blockchain ? 'Blockchain fingerprint verified.' : 'Local manifest seal verified.') : (result.reason || 'Manifest verification failed.') });
     } catch (err) {
       onToast({ kind: 'error', message: err instanceof Error ? err.message : 'Paste valid JSON from an exported evidence manifest.' });
     } finally {
@@ -1221,16 +1222,16 @@ function SecurityCenter({ onToast }: { onToast: (toast: Toast) => void }) {
     </div>
 
     <section className="panel security-tool-panel">
-      <SectionTitle title="Cryptographic evidence manifest verifier" detail="Paste any exported evidence-manifest.json to verify its HMAC-SHA256 seal and detect tampering." />
+      <SectionTitle title="Evidence verifier" detail="Paste an exported manifest to check its local seal, or paste a blockchain bundle to check its recorded fingerprint." />
       <form className="security-backup-form" onSubmit={(event) => void checkManifest(event)}>
-        <textarea id="manifest-json" name="manifest_json" aria-label="Evidence manifest JSON" className="manifest-textarea" value={manifestText} onChange={(e) => setManifestText(e.target.value)} placeholder='Paste exported manifest JSON here (e.g. from Evidence Review -> Manifest JSON)...' required />
+        <textarea id="manifest-json" name="manifest_json" aria-label="Evidence manifest JSON" className="manifest-textarea" value={manifestText} onChange={(e) => { setManifestText(e.target.value); setManifestResult(null); }} placeholder="Paste the downloaded JSON here" required />
         <button className="button button-primary" type="submit" disabled={working !== '' || !manifestText.trim()}>
-          {working === 'manifest' ? <LoaderCircle size={15} className="spin" /> : <FileCode2 size={15} />} Verify Manifest HMAC Seal
+          {working === 'manifest' ? <LoaderCircle size={15} className="spin" /> : <FileCode2 size={15} />} Verify evidence
         </button>
       </form>
       {manifestResult && (
         <div className={`security-result ${manifestResult.verified ? '' : 'security-result-error'}`} role="status">
-          <strong>{manifestResult.verified ? 'SEAL VERIFIED · UNMODIFIED' : 'VERIFICATION FAILED · TAMPERING OR KEY MISMATCH'}</strong>
+          <strong>{manifestResult.verified ? (manifestResult.blockchain ? 'BLOCKCHAIN FINGERPRINT VERIFIED' : 'LOCAL SEAL VERIFIED') : 'VERIFICATION FAILED'}</strong>
           <span>{manifestResult.verified ? `Payload SHA-256: ${manifestResult.payloadSha256}` : manifestResult.reason}</span>
         </div>
       )}
@@ -1628,13 +1629,14 @@ function Library({ clips, cameras, onAddOrChange, onDelete }: {
   </>;
 }
 
-function Review({ analysisId, analysisSummary, onOpenSearch, onToast, onRefresh }: {
-  analysisId: string; analysisSummary?: Analysis; onOpenSearch: (candidateId: string) => void; onToast: (toast: Toast) => void; onRefresh: () => void;
+function Review({ analysisId, analysisSummary, canAnchor, onOpenSearch, onToast, onRefresh }: {
+  analysisId: string; analysisSummary?: Analysis; canAnchor: boolean; onOpenSearch: (candidateId: string) => void; onToast: (toast: Toast) => void; onRefresh: () => void;
 }) {
   const [record, setRecord] = useState<Analysis | null>(null);
   const [selectedId, setSelectedId] = useState('');
   const [note, setNote] = useState('');
   const [busy, setBusy] = useState(false);
+  const [anchoring, setAnchoring] = useState(false);
   const [showEnhanced, setShowEnhanced] = useState(false);
   const [showFilters, setShowFilters] = useState(false);
   const [brightness, setBrightness] = useState(100);
@@ -1643,6 +1645,7 @@ function Review({ analysisId, analysisSummary, onOpenSearch, onToast, onRefresh 
   const [arming, setArming] = useState(false);
   const [showPrivacyModal, setShowPrivacyModal] = useState(false);
   const videoRef = useRef<HTMLVideoElement>(null);
+  const characteristicsRef = useRef<HTMLElement>(null);
 
   const load = useCallback(async () => {
     if (!analysisId) return;
@@ -1690,20 +1693,47 @@ function Review({ analysisId, analysisSummary, onOpenSearch, onToast, onRefresh 
     }
   };
 
-  const jumpToFrame = () => {
-    if (!selected || !videoRef.current) return;
-    videoRef.current.currentTime = selected.time;
-    void videoRef.current.play();
+  const inspectSourceAt = (seconds: number) => {
+    if (!videoRef.current) return;
+    videoRef.current.currentTime = seconds;
+    videoRef.current.pause();
+    videoRef.current.scrollIntoView({ block: 'nearest' });
+  };
+
+  const anchorEvidence = async () => {
+    setAnchoring(true);
+    try {
+      const bundle = await api.publishBlockchainEvidence(analysisId);
+      const url = URL.createObjectURL(new Blob([JSON.stringify(bundle, null, 2)], { type: 'application/json' }));
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `drishti-${analysisId}-blockchain.json`;
+      link.click();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+      onToast({ kind: 'success', message: 'Fingerprint submitted. Verify the downloaded blockchain bundle in Security.' });
+      onRefresh();
+    } catch (error) {
+      onToast({ kind: 'error', message: error instanceof Error ? error.message : 'Could not submit the fingerprint.' });
+    } finally {
+      setAnchoring(false);
+    }
   };
 
   if (!analysisId) return <section className="panel no-analysis"><ScanFace size={32} /><h2>Select an investigation</h2><p>Choose a completed investigation from Case desk to review the extracted candidates.</p></section>;
   const active = record || analysisSummary;
   const alerts = record?.result?.alerts || [];
+  const bestCandidate = record?.candidates.reduce<Candidate | undefined>(
+    (best, candidate) => (!best || candidate.score > best.score ? candidate : best),
+    undefined,
+  );
+  const assessmentTime = bestCandidate?.time ?? record?.result?.windowStart ?? 0;
 
   return <>
     <div className="review-context-bar"><div className="context-icon"><FileVideo2 size={18} /></div><div><strong>{active?.clipName || 'Loading clip record…'}</strong><span>{active?.caseRef ? `${active.caseRef} · ` : ''}{active?.transactionRef || 'No transaction reference'} · {active?.timeMode === 'absolute' ? 'Bank timestamp' : 'Clip-relative time'} {active?.transactionTime}</span></div><div className="context-window"><Clock3 size={15} /> ±{active?.windowSeconds || 0}s window</div><StatusBadge status={record?.status || active?.status || 'running'} />{record?.status === 'completed' && <><a className="button button-outline button-compact" href={`/api/evidence/${record.id}/manifest.json`} download><FileCode2 size={15} /> Manifest</a><a className="button button-outline button-compact" href={`/api/evidence/${record.id}/bsa63.pdf`} download><BadgeCheck size={15} /> BSA Sec 63</a><a className="button button-outline button-compact evidence-download" href={`/api/evidence/${record.id}.pdf`} download><Download size={15} /> PDF</a><a className="button button-primary button-compact" href={`/api/evidence/${record.id}/bundle.zip`} download><HardDrive size={15} /> Case Bundle (.zip)</a></>}</div>
     {record?.status === 'running' && <div className="processing-banner"><LoaderCircle size={18} className="spin" /><div><strong>Reviewing the transaction window locally</strong><span>Detecting people, checking occlusion/shoulder-surfing, and indexing SFace 128-D embeddings.</span></div><span className="process-time">ANALYSIS RUNNING</span></div>}
     {record?.status === 'failed' && <div className="error-banner"><AlertCircle size={18} /><div><strong>Analysis could not complete</strong><span>{record.error}</span></div></div>}
+    {canAnchor && record?.status === 'completed' && <button type="button" className="button button-outline button-compact" disabled={anchoring} onClick={() => void anchorEvidence()}><Fingerprint size={15} />{anchoring ? 'Submitting fingerprint…' : 'Anchor manifest on blockchain'}</button>}
+    {record?.status === 'completed' && <button type="button" className="button button-outline button-compact" onClick={() => characteristicsRef.current?.focus()}><Eye size={15} /> Physical characteristics</button>}
     {alerts.length > 0 && (
       <div className="alert-stack">
         {alerts.map((alert, idx) => (
@@ -1745,7 +1775,7 @@ function Review({ analysisId, analysisSummary, onOpenSearch, onToast, onRefresh 
               </div>
             )}
             <div className="selected-image"><img style={{ filter: `brightness(${brightness}%) contrast(${contrast}%)` }} src={showEnhanced ? selected.enhancedUrl : selected.imageUrl} alt={showEnhanced ? 'Enhanced candidate face crop' : 'Selected candidate face crop'} /><span className="selected-score">{Math.round(selected.score)}<small> QUALITY</small></span></div>
-            <button className="text-button frame-link" onClick={jumpToFrame}><Play size={14} /> Find this time in clip <span>{selected.timeLabel}</span></button>
+            <button className="text-button frame-link" onClick={() => inspectSourceAt(selected.time)}><Play size={14} /> Find this time in clip <span>{selected.timeLabel}</span></button>
             <QualityBars metrics={selected.metrics} />
             <div className="review-flags"><strong>Reliability flags</strong>{selected.flags.length ? selected.flags.map((flag) => <span className="flag-chip" key={flag}><AlertCircle size={13} />{flag}</span>) : <span className="clear-flag"><Check size={13} /> No occlusion or quality flags</span>}</div>
             <label className="review-note" htmlFor="investigator-note"><span>Investigator note</span><textarea id="investigator-note" name="note" value={note} maxLength={500} onChange={(event) => setNote(event.target.value)} placeholder="Add an observation or comparison note…" /></label>
@@ -1760,6 +1790,22 @@ function Review({ analysisId, analysisSummary, onOpenSearch, onToast, onRefresh 
           </> : <div className="selected-empty"><ScanFace size={24} /><p>Candidate details and review actions appear here.</p></div>}
         </section>
         <section className="panel clip-player-panel"><SectionTitle title="Source footage" detail="Stored locally · use controls to inspect context" />{record ? <video ref={videoRef} src={`/api/clips/${record.clipId}/video`} controls muted playsInline preload="metadata" /> : <div className="video-skeleton"><LoaderCircle size={20} className="spin" /></div>}<div className="source-meta"><span><LockKeyhole size={13} /> LOCAL FILE</span><span>{record?.result?.windowStart !== undefined ? `${formatDuration(record.result.windowStart)}–${formatDuration(record.result.windowEnd || 0)}` : 'Transaction window'}</span></div></section>
+        {record?.status === 'completed' && (
+          <section ref={characteristicsRef} tabIndex={-1} aria-label="Physical characteristics" className="panel clip-player-panel">
+            <SectionTitle title="Physical characteristics" detail="Footage assessment for the analyzed time window" />
+            <p className="footage-assessment-summary">{record.result.sampledFrames ?? 0} frames sampled · {record.candidates.length} face candidates saved</p>
+            <p className="footage-assessment-summary">{bestCandidate
+              ? `Highest-ranked face crop at ${bestCandidate.timeLabel} · image quality ${Math.round(bestCandidate.score)}/100${bestCandidate.flags.length ? ` · ${bestCandidate.flags.join(', ')}` : ''}`
+              : 'No face crop was found in this window. Open the source footage to inspect the scene.'}</p>
+            <dl className="footage-assessment">
+              <div><dt>Height</dt><dd>Needs a calibrated view with head and feet visible.</dd></div>
+              <div><dt>Weight</dt><dd>Needs an independent measurement.</dd></div>
+              <div><dt>Age</dt><dd>Needs a verified record or a validated age-range model with a clear face view.</dd></div>
+              <div><dt>Gender</dt><dd>Needs self-reported or verified information.</dd></div>
+            </dl>
+            <button type="button" className="text-button frame-link" onClick={() => inspectSourceAt(assessmentTime)}><Video size={14} /> {bestCandidate ? 'Inspect the highest-ranked frame' : 'Inspect the start of the window'} <span>{formatDuration(assessmentTime)}</span></button>
+          </section>
+        )}
       </aside>
     </div>
     {record?.status === 'completed' && <section className="panel timeline-panel"><SectionTitle title="Transaction timeline" detail="Candidate frames within the selected time window" />
@@ -1891,8 +1937,8 @@ function Reports({ data, analyses, events }: { data: ReportsData | null; analyse
 function Audit({ items, events, integrity }: { items: AuditItem[]; events: EventItem[]; integrity: AuditIntegrity | null }) {
   const [filter, setFilter] = useState('all');
   const combined = useMemo(() => [
-    ...items.map((item) => ({ id: item.id, kind: item.action, message: item.note, time: item.occurredAt, source: 'Operator action', severity: 'info' })),
-    ...events.map((item) => ({ id: item.id, kind: item.kind, message: item.message, time: item.occurredAt, source: 'System event', severity: item.severity })),
+    ...items.map((item) => ({ id: item.id, kind: item.action, message: item.description ?? item.note, time: item.occurredAt, source: 'Audit entry', severity: '', actor: item.actorId, subject: item.subjectId })),
+    ...events.map((item) => ({ id: item.id, kind: item.kind, message: item.message, time: item.occurredAt, source: 'System event', severity: item.severity, actor: null, subject: '' })),
   ].sort((a, b) => b.time.localeCompare(a.time)), [items, events]);
   const visible = filter === 'all' ? combined : combined.filter((item) => item.source === filter);
   return <section className="panel audit-panel">
@@ -1903,7 +1949,7 @@ function Audit({ items, events, integrity }: { items: AuditItem[]; events: Event
         <div className="page-actions">
           <a className="button button-outline button-compact" href="/api/audit/export?format=csv" download><Download size={14} /> CSV</a>
           <a className="button button-outline button-compact" href="/api/audit/export?format=json" download><FileCode2 size={14} /> Signed JSON</a>
-          <div className="audit-filters"><button className={filter === 'all' ? 'filter-active' : ''} onClick={() => setFilter('all')}>All</button><button className={filter === 'Operator action' ? 'filter-active' : ''} onClick={() => setFilter('Operator action')}>Operator</button><button className={filter === 'System event' ? 'filter-active' : ''} onClick={() => setFilter('System event')}>System</button></div>
+          <div className="audit-filters"><button className={filter === 'all' ? 'filter-active' : ''} onClick={() => setFilter('all')}>All</button><button className={filter === 'Audit entry' ? 'filter-active' : ''} onClick={() => setFilter('Audit entry')}>Audit entries</button><button className={filter === 'System event' ? 'filter-active' : ''} onClick={() => setFilter('System event')}>System events</button></div>
         </div>
       }
     />
@@ -1913,7 +1959,7 @@ function Audit({ items, events, integrity }: { items: AuditItem[]; events: Event
       {integrity && <span>{integrity.entriesChecked} entries checked</span>}
       {!integrity?.verified && integrity?.reason && <span>{integrity.reason}</span>}
     </div>
-    {visible.length ? <div className="table-scroll"><table className="data-table audit-table"><thead><tr><th>TIME</th><th>ACTION</th><th>DETAIL</th><th>TYPE</th><th>SEVERITY</th></tr></thead><tbody>{visible.map((item) => <tr key={item.id}><td className="mono-data">{new Date(item.time).toLocaleString('en-IN', { dateStyle: 'short', timeStyle: 'medium' })}</td><td><strong>{item.kind}</strong></td><td>{item.message}</td><td><span className="source-label">{item.source}</span></td><td><span className={`severity severity-${item.severity}`}>{item.severity}</span></td></tr>)}</tbody></table></div> : <EmptyLine icon={<FileClock size={18} />} title="No audit entries" detail="Upload, analysis and review actions appear here." />}
+    {visible.length ? <div className="table-scroll"><table className="data-table audit-table"><thead><tr><th>TIME</th><th>ACTION</th><th>DETAIL</th><th>SUBJECT / ACCOUNT ID</th><th>TYPE</th><th>SEVERITY</th></tr></thead><tbody>{visible.map((item) => <tr key={`${item.source}-${item.id}`}><td className="mono-data">{new Date(item.time).toLocaleString('en-IN', { dateStyle: 'short', timeStyle: 'medium' })}</td><td><strong>{item.kind}</strong></td><td>{item.message}</td><td>{item.subject || '—'}{item.actor && <><br />Account: {item.actor}</>}</td><td><span className="source-label">{item.source}</span></td><td>{item.severity ? <span className={`severity severity-${item.severity}`}>{item.severity}</span> : '—'}</td></tr>)}</tbody></table></div> : <EmptyLine icon={<FileClock size={18} />} title="No audit entries" detail="Upload, analysis and review actions appear here." />}
     <div className="audit-footnote"><LockKeyhole size={15} /> Hash-linked audit records reveal accidental or partial changes; privileged database rewrites require external signed checkpoints to detect.</div>
   </section>;
 }

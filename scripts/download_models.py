@@ -10,17 +10,17 @@ ROOT = Path(__file__).resolve().parents[1]
 MODELS = ROOT / "models"
 ASSETS = {
     "face_detection_yunet_2023mar.onnx": (
-        "https://github.com/opencv/opencv_zoo/raw/refs/heads/3cce3b223f17fcce4d86d01dd4502840bf036019/models/face_detection_yunet/face_detection_yunet_2023mar.onnx",
+        "https://media.githubusercontent.com/media/opencv/opencv_zoo/main/models/face_detection_yunet/face_detection_yunet_2023mar.onnx",
         100_000,
         "8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4",
     ),
     "person_detection_mediapipe_2023mar.onnx": (
-        "https://huggingface.co/opencv/opencv_zoo/resolve/39a1451/models/person_detection_mediapipe/person_detection_mediapipe_2023mar.onnx",
+        "https://media.githubusercontent.com/media/opencv/opencv_zoo/main/models/person_detection_mediapipe/person_detection_mediapipe_2023mar.onnx",
         10_000_000,
         "47fd5599d6fa17608f03e0eb0ae230baa6e597d7e8a2c8199fe00abea55a701f",
     ),
     "face_recognition_sface_2021dec.onnx": (
-        "https://github.com/opencv/opencv_zoo/raw/refs/heads/main/models/face_recognition_sface/face_recognition_sface_2021dec.onnx",
+        "https://media.githubusercontent.com/media/opencv/opencv_zoo/main/models/face_recognition_sface/face_recognition_sface_2021dec.onnx",
         30_000_000,
         "0ba9fbfa01b5270c96627c4ef784da859931e02f04419c829e83484087c34e79",
     ),

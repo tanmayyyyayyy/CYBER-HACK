@@ -353,8 +353,10 @@ def append_audit(
 ) -> str:
     stamp = occurred_at or datetime.now(timezone.utc).isoformat(timespec="seconds")
     actor = actor_id or AUDIT_ACTOR.get()
-    if actor and f"operator={actor}" not in note:
+    if actor:
         note = f"{note} · operator={actor}"
+    if not db.in_transaction:
+        db.execute("BEGIN IMMEDIATE")
     previous = db.execute("SELECT entry_hash FROM audit_log ORDER BY rowid DESC LIMIT 1").fetchone()
     previous_hash = previous[0] if previous else ""
     entry_id = uuid.uuid4().hex

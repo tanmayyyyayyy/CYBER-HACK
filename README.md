@@ -1,12 +1,12 @@
 # Drishti — PS04 ATM CCTV Suspect Face Extraction & Forensic Evidence Platform
 
-**Drishti** is an air-gapped, local-first video analytics and court-ready forensic evidence workstation built for **Rajasthan Police Cyber Security Hackathon 2026 — PS04 (ATM CCTV Suspect Face Extraction for Card & ATM Fraud Investigation)**.
+**Drishti** is a local-first video analytics and forensic evidence review workstation built for **Rajasthan Police Cyber Security Hackathon 2026 — PS04 (ATM CCTV Suspect Face Extraction for Card & ATM Fraud Investigation)**.
 
 It ingests ATM CCTV footage (including proprietary DVR/NVR exports), links clips to bank transaction timestamps or Electronic Journal (EJ) logs, tracks people inside the ATM keypad/cash-slot zone, ranks the clearest candidate face frames with occlusion/quality flags, searches across clips via **SFace 128-D** deep face embeddings, and exports **BSA Section 63 Certificates**, **Sealed PDF Evidence Sheets**, **DPDP Bystander-Redacted Frames**, and **Offline Forensic Case Bundles (`.zip`)**.
 
 Alongside the primary PS04 clip-forensic workflow, Drishti includes a sandboxed **Local Real-Time AI Console** (`Real-time AI`) capable of monitoring local clips, USB cameras, or Android IP Webcams—automatically collecting face evidence & suspicious incident snapshots into SQLite and alerting when the same person returns repeatedly.
 
-> **PS04 Scope & Compliance Notice:** The interface is Rajasthan Police-inspired and is **not** an official Rajasthan Police system. Processing runs strictly locally on `127.0.0.1` with zero external APIs, cloud databases, telemetry, Aadhaar lookups, or real criminal database connections. Live bank CCTV connections are never established; quality scores, watchlist alerts, and embedding similarities are investigative decision-support aids requiring human verification.
+> **PS04 scope:** The interface is Rajasthan Police-inspired and has no official affiliation. Video processing and evidence storage run locally. Optional blockchain verification contacts the configured node. The on-chain record contains a manifest fingerprint and format marker. Quality scores and watchlist alerts require human review.
 
 ---
 
@@ -28,6 +28,7 @@ Alongside the primary PS04 clip-forensic workflow, Drishti includes a sandboxed 
 - **Cross-Clip Face Search (`Face search` / `/api/search`):** Uses normalized **SFace** 128-D embeddings (`face_recognition_sface_2021dec.onnx` under `_sface_infer_lock`) for cosine-similarity search across other clips in the vault.
 
 ### 4. Inspection, Enhancement, Privacy Redaction & Court Exports (`Evidence review`)
+- **Physical characteristics:** Every completed review includes the analyzed window's sample count, highest-ranked face crop, and quality flags. Inspect the full source frame at its timestamp. The panel explains the evidence required for height, weight, age, and gender assessments. It does not generate demographic predictions.
 - **Forensic Light Studio:** Interactive **Brightness** (`60–200%`) and **Contrast** (`60–220%`) inspection sliders.
 - **Labelled Enhancement (`/api/candidates/{id}/enhanced`):** Toggle **Original Raw** vs. deterministic **Enhanced (2× Lanczos4 + CLAHE + bilateral + unsharp)** — non-generative and clearly watermarked as a review aid.
 - **DPDP Bystander Privacy Redaction (`/api/candidates/{id}/frame-redacted`):** Generates a downloadable **Privacy Frame** that Gaussian-blurs bystanders outside the target suspect while preserving the selected candidate and SHA-256 provenance.
@@ -81,6 +82,7 @@ Drishti AI integrates over authenticated loopback REST APIs (`POST /sec-api/brid
 - **Cryptographic Custody & WAL Persistence:**
   - Dual SHA-256 fingerprints (`original` upload + `normalized` review bytes) + vault-wide integrity sweeps (`/api/security/evidence-check`).
   - Hash-chained SQLite audit log verifiable at `/api/audit/integrity`.
+  - Audit entries show recorded subject and account IDs. Candidate reviews record the source timestamp and status transition. Live incident deletions record the camera and capture time. Camera configuration entries omit credentials and describe the configuration action.
   - **HMAC-SHA256 Manifests** signed with local `signing.key` (`0600`) and verifiable at `/api/security/verify-manifest`.
   - SQLite runs with `PRAGMA journal_mode = WAL`, `PRAGMA synchronous = NORMAL`, `PRAGMA secure_delete = ON`, file mode `0600`, inside `0700` `backend/data/` (overridable via `DRISHTI_DATA_DIR`).
 - **Encrypted Backups & Restore:** In-memory SQLite online snapshots normalize WAL header bytes (`v1` rollback format) and encrypt with **AES-256-GCM** using an unstored operator passphrase. Restore while the app is stopped (cleans stale `-wal`/`-shm`/`-journal` sidecars safely):
@@ -111,6 +113,22 @@ npm run build
 ```
 
 ---
+
+## Quick setup on Windows
+
+From PowerShell in the repository folder, with Python, Node.js, FFmpeg, and FFprobe on your command path:
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+npm.cmd ci
+.\.venv\Scripts\python.exe scripts/download_models.py
+.\.venv\Scripts\python.exe scripts/doctor.py
+npm.cmd run build
+.\.venv\Scripts\python.exe -m uvicorn backend.main:app --host 127.0.0.1 --port 8000
+```
+
+For the blockchain demo, use `npm.cmd run blockchain:demo` to start the app on port `8001` with the local chain.
 
 ## Local AI Models (Pinned, Non-AGPL & Checksummed)
 
@@ -153,6 +171,18 @@ CYBER-HACK/
 ```
 
 ---
+
+## Blockchain evidence verification
+
+Build the frontend and run `npm run blockchain:demo`. Open `http://127.0.0.1:8001` and sign in as an administrator. The runner starts a persistent, loopback-only Anvil demo chain. Its data lives in `backend/data/demo-blockchain/` by default. It reuses the local case vault and leaves live camera processing paused on startup.
+
+1. Open a completed case and choose **Anchor manifest on blockchain**. Save the downloaded JSON bundle.
+2. Open **Security → Evidence verifier**, paste the bundle, and choose **Verify evidence**.
+3. Duplicate the bundle, edit a value inside `manifest`, and verify the copy. The original must match the blockchain transaction. The edited copy must fail.
+
+Only a version marker and SHA-256 fingerprint of the signed manifest are written to the chain. The bundle contains evidence metadata and must be handled as local evidence. Verification establishes that the canonical block contains the fingerprint. The separate vault integrity check compares the current footage against its stored fingerprints.
+
+The local demo chain is controlled by the same workstation. For an independent checkpoint, configure an approved Ethereum-compatible network using `DRISHTI_CHAIN_RPC_URL`, `DRISHTI_CHAIN_ID` (hexadecimal), and `DRISHTI_CHAIN_SENDER`. Publishing requires an RPC provider configured to sign `eth_sendTransaction` for that authorized account. Use a separate independently operated RPC endpoint for independent verification. Drishti neither stores blockchain private keys nor deploys a smart contract.
 
 ## Verification & Tests
 

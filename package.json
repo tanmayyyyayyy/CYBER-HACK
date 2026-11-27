@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "blockchain:demo": "node scripts/run_blockchain_demo.mjs",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview --host 127.0.0.1"
   },
@@ -21,5 +22,12 @@
     "@vitejs/plugin-react": "^4.3.4",
     "typescript": "^5.6.3",
     "vite": "^6.0.3"
+  },
+  "optionalDependencies": {
+    "@foundry-rs/anvil-darwin-amd64": "1.7.1",
+    "@foundry-rs/anvil-darwin-arm64": "1.7.1",
+    "@foundry-rs/anvil-linux-amd64": "1.7.1",
+    "@foundry-rs/anvil-linux-arm64": "1.7.1",
+    "@foundry-rs/anvil-win32-amd64": "1.7.1"
   }
 }

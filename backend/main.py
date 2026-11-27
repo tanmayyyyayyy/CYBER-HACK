@@ -32,7 +32,7 @@ from reportlab.lib.pagesizes import A4
 from reportlab.lib.utils import ImageReader
 from reportlab.pdfgen import canvas
 
-from backend import analysis, auth, forensics, store, streams
+from backend import analysis, auth, blockchain, forensics, store, streams
 from backend.security import encrypt_snapshot, sign_manifest, verify_manifest
 from security_portal import router as security_portal_router
 
@@ -1110,6 +1110,8 @@ def clip_integrity(clip_id: str) -> dict:
 
 
 def _queue_analysis_job(clip: dict, payload: AnalysisRequest) -> dict:
+    if analysis_pool is None:
+        raise HTTPException(503, "Local analysis worker is not ready. Restart the service and retry.")
     if payload.time_mode == "clip":
         try:
             seconds = analysis._time_seconds(payload.transaction_time)
@@ -1147,13 +1149,13 @@ def _queue_analysis_job(clip: dict, payload: AnalysisRequest) -> dict:
         )
         store.append_audit(
             db,
-            "analysis.started",
+            "analysis.queued",
             job_id,
-            f"Window ±{payload.window_seconds}s at {payload.transaction_time} (case={payload.case_ref.strip() or 'unassigned'})",
+            f"Queued analysis of {clip['filename']} ({clip['camera_id']}) within ±{payload.window_seconds}s of {payload.transaction_time}. "
+            f"Time mode: {payload.time_mode}. Case: {payload.case_ref.strip() or 'unassigned'}. "
+            f"Transaction: {payload.transaction_ref.strip() or 'unassigned'}.",
             stamp,
         )
-    if analysis_pool is None:
-        raise HTTPException(503, "Local analysis worker is not ready. Restart the service and retry.")
     analysis_context = contextvars.copy_context()
     analysis_pool.submit(analysis_context.run, analysis.run_analysis, job_id)
     return {"id": job_id, "status": "running", "clipId": clip["id"], "transactionTime": payload.transaction_time}
@@ -1298,11 +1300,17 @@ def candidate_frame_redacted(candidate_id: str) -> StreamingResponse:
 
 @app.patch("/api/candidates/{candidate_id}/review")
 def review_candidate(candidate_id: str, payload: ReviewRequest) -> dict:
-    candidate = _candidate_or_404(candidate_id)
     with store.connect() as db:
+        db.execute("BEGIN IMMEDIATE")
+        candidate = db.execute("SELECT * FROM candidates WHERE id=?", (candidate_id,)).fetchone()
+        if candidate is None:
+            raise HTTPException(404, "Candidate not found.")
         db.execute("UPDATE candidates SET review_status=?, note=? WHERE id=?", (payload.status, payload.note.strip(), candidate_id))
         store.append_audit(
-            db, f"candidate.{payload.status}", candidate_id, payload.note.strip() or f"Review marked {payload.status}", now()
+            db, f"candidate.{payload.status}", candidate_id,
+            f"Candidate at {candidate['frame_seconds']:.3f}s in analysis {candidate['analysis_id']}. "
+            f"Review status: {candidate['review_status']} → {payload.status}. "
+            f"Investigator note: {payload.note.strip() or '(empty)'}", now(),
         )
     return {"id": candidate_id, "status": payload.status, "analysisId": candidate["analysis_id"]}
 
@@ -1531,7 +1539,17 @@ def set_stream_source(stream_id: str, payload: StreamSourceRequest) -> dict:
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
     with store.connect() as db:
-        store.append_audit(db, "streams.source_changed", stream_id, f"Set stream source to {payload.source.strip() or 'default'}", now())
+        source = payload.source.strip()
+        if source.lower() == "clear":
+            detail = "Cleared camera slot."
+        elif source.lower() in ("", "default"):
+            detail = "Restored the default camera slot source."
+        elif source.isdigit():
+            detail = f"Configured local camera device {source}."
+        else:
+            scheme = source.split(":", 1)[0].upper()
+            detail = f"Configured {scheme} camera source. Connection is verified separately by frame delivery."
+        store.append_audit(db, "streams.source_changed", stream_id, detail, now())
     return status
 
 
@@ -1829,7 +1847,7 @@ def clear_live_evidence() -> dict:
         db.execute("DELETE FROM live_sightings")
         db.execute("DELETE FROM live_identities")
         db.execute("DELETE FROM live_incidents")
-        store.append_audit(db, "live_evidence.cleared", "live-db", f"Cleared {count_row[0]} auto-collected live subject(s) & incidents", now())
+        store.append_audit(db, "live_evidence.cleared", "live-db", f"Deleted {len(id_rows)} live subject records, {len(sighting_rows)} sighting records, and {len(inc_rows)} incident records.", now())
     for raw_p in [*(r["image_path"] for r in sighting_rows), *(r["best_image_path"] for r in id_rows), *(r["image_path"] for r in inc_rows)]:
         p = _safe_live_evidence_path(raw_p)
         if p:
@@ -1948,7 +1966,7 @@ def live_incident_pdf(incident_id: str, request: Request) -> StreamingResponse:
 @app.get("/api/live-incidents/{incident_id}/image")
 def live_incident_image(incident_id: str) -> FileResponse:
     with store.connect() as db:
-        row = db.execute("SELECT image_path FROM live_incidents WHERE id=?", (incident_id,)).fetchone()
+        row = db.execute("SELECT image_path, camera_id, kind, occurred_at FROM live_incidents WHERE id=?", (incident_id,)).fetchone()
     if not row:
         raise HTTPException(404, "Live incident snapshot not found.")
     path = _safe_live_evidence_path(row["image_path"])
@@ -1964,6 +1982,7 @@ def delete_live_incident(incident_id: str) -> dict:
         if not row:
             raise HTTPException(404, "Live incident not found.")
         db.execute("DELETE FROM live_incidents WHERE id=?", (incident_id,))
+        store.append_audit(db, "live_incident.deleted", incident_id, f"Deleted {row['kind']} incident record from {row['camera_id']} captured at {row['occurred_at']}.", now())
     p = _safe_live_evidence_path(row["image_path"])
     if p:
         p.unlink(missing_ok=True)
@@ -2213,18 +2232,28 @@ def list_events(limit: int = 100) -> list[dict]:
 @app.get("/api/audit")
 def list_audit(limit: int = 100) -> list[dict]:
     with store.connect() as db:
-        rows = db.execute("SELECT * FROM audit_log ORDER BY occurred_at DESC LIMIT ?", (max(1, min(limit, 500)),)).fetchall()
-    return [
+        rows = db.execute("SELECT * FROM audit_log ORDER BY rowid DESC LIMIT ?", (max(1, min(limit, 500)),)).fetchall()
+    items = []
+    for r in rows:
+        match = re.search(r" · operator=([0-9a-f]{32})$", r["note"])
+        description = r["note"][:match.start()] if match else r["note"]
+        if r["action"] == "streams.source_changed" and description.startswith("Set stream source to "):
+            source = description.removeprefix("Set stream source to ")
+            if "://" in source:
+                description = f"Configured {source.split(':', 1)[0].upper()} camera source. Frame delivery was not verified by this action."
+        items.append(
         {
             "id": r["id"],
             "action": r["action"],
             "subjectId": r["subject_id"],
             "note": r["note"],
+            "description": description,
+            "actorId": match[1] if match else None,
             "occurredAt": r["occurred_at"],
             "entryHash": r["entry_hash"],
         }
-        for r in rows
-    ]
+        )
+    return items
 
 
 @app.get("/api/audit/integrity")
@@ -2236,6 +2265,7 @@ def audit_integrity() -> dict:
 @app.get("/api/audit/export")
 def export_audit(format: str = "json") -> StreamingResponse:
     with store.connect() as db:
+        db.execute("BEGIN")
         integrity = store.verify_audit(db)
         rows = db.execute("SELECT * FROM audit_log ORDER BY rowid ASC").fetchall()
     if format == "csv":
@@ -2358,6 +2388,54 @@ def evidence_manifest(analysis_id: str) -> StreamingResponse:
         media_type="application/json",
         headers={"Content-Disposition": f'attachment; filename="evidence-{quote(safe_id)}-manifest.json"'},
     )
+
+
+class BlockchainEvidence(BaseModel):
+    manifest: dict
+    chainId: str = Field(max_length=32)
+    transactionHash: str = Field(max_length=66)
+
+
+def _blockchain_fingerprint(manifest: dict) -> str:
+    canonical = json.dumps(manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+@app.post("/api/evidence/{analysis_id}/blockchain")
+def publish_blockchain_evidence(analysis_id: str, request: Request) -> dict:
+    require_admin(request)
+    manifest = _build_evidence_manifest(analysis_id)
+    clip = _clip_or_404(manifest["clip"]["id"])
+    if not manifest["auditHeadHash"] or any(not item["cropSha256"] for item in manifest["candidates"]):
+        raise HTTPException(409, "The audit chain or candidate files could not be verified.")
+    if not _matches_sha256(Path(clip["source_path"] or clip["path"]), clip["sha256"]) or not _matches_sha256(Path(clip["path"]), clip["analysis_sha256"]):
+        raise HTTPException(409, "The current footage does not match its recorded fingerprints.")
+    digest = _blockchain_fingerprint(manifest)
+    try:
+        anchor = blockchain.publish(digest)
+    except blockchain.BlockchainError as exc:
+        raise HTTPException(503, str(exc)) from exc
+    with store.connect() as db:
+        store.append_audit(db, "evidence.blockchain_submitted", analysis_id,
+                           f"Submitted manifest SHA-256 {digest} to chain {anchor['chainId']} in transaction {anchor['transactionHash']}.", now())
+    return {"manifest": manifest, **anchor}
+
+
+@app.post("/api/security/verify-blockchain")
+def verify_blockchain_evidence(payload: BlockchainEvidence, request: Request) -> dict:
+    require_admin(request)
+    try:
+        digest = _blockchain_fingerprint(payload.manifest)
+        result = blockchain.verify(digest, payload.chainId, payload.transactionHash)
+    except ValueError as exc:
+        raise HTTPException(422, "Manifest contains values that cannot be hashed.") from exc
+    except blockchain.BlockchainError as exc:
+        raise HTTPException(503, str(exc)) from exc
+    with store.connect() as db:
+        store.append_audit(db, "evidence.blockchain_checked", payload.transactionHash,
+                           f"Checked manifest SHA-256 {digest} on chain {payload.chainId}. "
+                           f"{result.get('reason') or 'Found matching fingerprint in the canonical block.'}", now())
+    return {**result, "payloadSha256": digest}
 
 
 def _render_evidence_pdf_bytes(analysis_id: str) -> bytes:
