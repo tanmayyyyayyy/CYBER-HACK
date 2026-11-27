@@ -156,7 +156,7 @@ export type JournalRow = {
 
 export type CameraSlot = { id: string; label: string; clips: Clip[]; status: string; source: string };
 export type Health = { status: string; service: string; models: Record<string, string>; ffmpeg: boolean; ffprobe?: boolean; cloud: string };
-export type AuditItem = { id: string; action: string; subjectId: string; note: string; occurredAt: string; entryHash?: string };
+export type AuditItem = { id: string; action: string; subjectId: string; note: string; description?: string; actorId?: string | null; occurredAt: string; entryHash?: string };
 export type AuditIntegrity = { verified: boolean; entriesChecked: number; headHash?: string; entryId?: string; reason?: string; limitation?: string };
 export type EventItem = { id: string; kind: string; message: string; severity: string; occurredAt: string };
 export type AuthUser = { id: string; email: string; displayName: string; role: 'administrator' | 'investigator'; status: string; createdAt: string };
@@ -314,6 +314,8 @@ export const api = {
   securityOverview: () => request<SecurityOverview>('/security/overview'),
   verifyAllEvidence: () => request<{ checked: number; verified: number; mismatches: { clipId: string; filename: string; sourceMatches: boolean; analysisMatches: boolean }[]; checkedAt: string; notice: string }>('/security/evidence-check', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ clip_ids: [] }) }),
   verifyManifest: (manifest: unknown) => request<{ verified: boolean; payloadSha256?: string; algorithm?: string; reason?: string }>('/security/verify-manifest', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ manifest }) }),
+  verifyBlockchainEvidence: (bundle: unknown) => request<{ verified: boolean; payloadSha256: string; blockNumber?: number; reason?: string }>('/security/verify-blockchain', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(bundle) }),
+  publishBlockchainEvidence: (analysisId: string) => request<{ manifest: unknown; transactionHash: string; chainId: string }>(`/evidence/${analysisId}/blockchain`, { method: 'POST' }),
   databaseBackups: () => request<DatabaseBackup[]>('/security/database-backups'),
   createDatabaseBackup: (passphrase: string) => request<DatabaseBackup>('/security/database-backups', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ passphrase }) }),
   health: () => request<Health>('/health'),
