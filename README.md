@@ -39,7 +39,7 @@ Alongside the primary PS04 clip-forensic workflow, Drishti includes a sandboxed 
   - **Offline Forensic Case Bundle `.zip` (`/api/evidence/{id}/bundle.zip`):** Single-click archive containing both PDFs, signed `evidence-manifest.json`, `case-dossier.json`, signed `audit-trail.json`, raw & enhanced stills, top bystander-redacted DPDP frame, and `VERIFY-OFFLINE.txt`.
 
 ### 5. Local Real-Time AI Console, Auto DB Evidence & Repeat-Person Alerting ([`backend/streams.py`](backend/streams.py))
-- **Sandboxed 4-Stream Control Room (`Real-time AI`):** Auto-starts on server boot across `CAM-01`–`CAM-04` (`2` local demo feeds + `2` open slots for video files, Android **IP Webcam** URLs like `http://<phone-ip>:8080/video`, `rtsp://...`, or Mac/USB camera indices `0–4`), plus `120`-frame rolling-buffer clip capture. Zero live bank CCTV connection.
+- **Sandboxed 4-Stream Control Room (`Real-time AI`):** Auto-starts on server boot across `CAM-01`–`CAM-04` (`2` local demo feeds + `2` open slots for video files, Android **IP Webcam** HTTP(S) URLs on an explicitly allowlisted private subnet, or Mac/USB camera indices `0–4`), plus `120`-frame rolling-buffer clip capture. RTSP is disabled pending redirect-safe handling. Zero live bank CCTV connection.
 - **Automatic SQLite Evidence & Repeat-Person Alerting (`/api/live-evidence`):** Faces detected on clean raw frames (`>= 0.56` normalized SFace threshold) are automatically cropped, SHA-256 hashed, and stored under sequential IDs (`SUB-001`, `SUB-002`, ...) in `live_identities` + `live_sightings`. If the same person re-appears (`>= 8s` absence or `>= 2s` camera switch), Drishti increments their visit count, saves a fresh crop, and triggers a **`stream.repeat_person`** priority alert with 1-click **Arm** to the local watchlist.
 - **Incident evidence (`/api/live-incidents`):** Review hashed scene snapshots from live monitoring, including camera interference (`stream.camera_tamper`), ATM-zone dwell (`stream.atm_zone_dwell`), and guard welfare cues (`stream.guard_welfare_check`). Dwell and welfare cues are local review alerts.
 - **Camera interference:** A sustained obscured view, abrupt framing change, strong localized glare, or loss of a previously active feed can trigger an alert. The incident includes a timestamped snapshot and a recent face crop when available. The crop is context for review. It does not identify who caused the interference.
@@ -108,6 +108,10 @@ Drishti AI integrates over authenticated loopback REST APIs (`POST /sec-api/brid
   - **UI:** `http://127.0.0.1:5174`
   - **OpenAPI Docs:** `http://127.0.0.1:8000/api/docs`
 
+Before attaching a network camera, set `DRISHTI_CAMERA_NETWORKS` to the camera subnet (for example, `192.168.1.0/24` in PowerShell or `export DRISHTI_CAMERA_NETWORKS=192.168.1.0/24` in a shell). Camera URLs must use an IP inside that private CIDR; DNS names, public IPs, loopback, and link-local addresses are rejected. Local USB camera indexes do not need this setting.
+
+Uploads are limited to 500 MB each and the local evidence directory defaults to a 20 GiB cap. Set `DRISHTI_MAX_VAULT_BYTES` to a positive byte count to change the cap. Keep adequate free disk space for temporary normalization copies.
+
 **Single-Bundle Local Serving:**
 ```bash
 npm run build
@@ -154,7 +158,7 @@ CYBER-HACK/
 │   ├── main.py          # FastAPI lifespan API, RBAC/CSRF middleware, EJ matcher, PDF/BSA63/Bundle ZIP exports
 │   ├── analysis.py      # MediaPipe person tracking, YuNet faces, SFace 128-D embeddings, quality/occlusion flags
 │   ├── forensics.py     # ffprobe metadata, FFmpeg DVR normalization, splice cues, CLAHE enhancement, DPDP blur
-│   ├── streams.py       # 4-stream local/IP-Webcam/RTSP monitor, DB evidence & repeat alerts, incident snapshots
+│   ├── streams.py       # 4-stream local/HTTP camera monitor, DB evidence & repeat alerts, incident snapshots
 │   ├── store.py         # SQLite WAL persistence, migrations, audit chain, dossier, watchlist & live evidence
 │   ├── security.py      # Path containment, security headers, AES-256-GCM backups, HMAC-SHA256 signing/verify
 │   └── auth.py          # scrypt password hashing, session cookies, CSRF tokens, hashed login throttling

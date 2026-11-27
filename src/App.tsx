@@ -381,7 +381,7 @@ function SlotSourceModal({ target, onClose, onChooseUpload, onConnectIpCam }: {
             </button>
             <button type="button" className="slot-modal-option" onClick={() => setTab('ipcam')}>
               <strong><Radio size={17} /> Connect IP Webcam / USB Cam</strong>
-              <span>Paste Android IP Webcam (`http://...:8080` or `/video`), DroidCam, RTSP, or camera `0`.</span>
+              <span>Paste a private IP Webcam address after configuring the allowed camera subnet, or use camera `0`.</span>
             </button>
           </div>
         ) : (
@@ -646,7 +646,7 @@ function SurveillanceWall({ state, events, watchlist, onRefresh, onOpenSlotModal
           <button type="button" className="button button-outline button-compact" disabled={camSaving} onClick={() => { setIpUrl(''); void applyCameraSource(camTarget, 'default'); }}>
             <RotateCcw size={14} /> Reset Slot
           </button>
-          <span className="ipcam-hint">IP Webcam / DroidCam: paste <code>http://&lt;phone-ip&gt;:8080</code> or <code>192.168.x.x:8080</code> (auto-finds <code>/video</code> &amp; <code>/shot.jpg</code>)</span>
+          <span className="ipcam-hint">IP Webcam / DroidCam: paste a private IP such as <code>192.168.1.50:8080</code> after setting <code>DRISHTI_CAMERA_NETWORKS</code> (auto-finds <code>/video</code> and <code>/shot.jpg</code>)</span>
         </form>
       </div>
 

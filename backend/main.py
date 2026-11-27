@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import contextvars
 import csv
 import hashlib
@@ -45,9 +46,22 @@ ALLOWED_EXTENSIONS = {
     ".dav", ".h264", ".264", ".ts", ".m4v", ".asf", ".vob",
 }
 MAX_UPLOAD_BYTES = 500 * 1024 * 1024
+MAX_VAULT_BYTES = int(os.environ.get("DRISHTI_MAX_VAULT_BYTES", str(20 * 1024 * 1024 * 1024)))
 LOCAL_ORIGINS = ["http://127.0.0.1:5174", "http://localhost:5174"]
 
 analysis_pool: ThreadPoolExecutor | None = None
+upload_lock = asyncio.Lock()
+
+
+def _vault_usage_bytes() -> int:
+    total = 0
+    for path in store.DATA.rglob("*"):
+        try:
+            if path.is_file() and not path.is_symlink():
+                total += path.stat().st_size
+        except OSError:
+            continue
+    return total
 
 
 def startup() -> None:
@@ -929,19 +943,18 @@ def camera_slots() -> list[dict]:
     ]
 
 
-@app.post("/api/clips", status_code=201)
-async def upload_clip(request: Request, filename: str, camera_id: str = "ATM-01", replace_clip_id: str = "") -> dict:
+async def _upload_clip_locked(request: Request, filename: str, camera_id: str, replace_clip_id: str) -> dict:
     original = Path(filename).name.strip()
     suffix = Path(original).suffix.lower()
     if camera_id not in {"ATM-01", "ATM-02", "ATM-03", "ATM-04"}:
         raise HTTPException(422, "Choose one of the four local ATM camera channels.")
     if suffix not in ALLOWED_EXTENSIONS:
         raise HTTPException(415, "Use MP4, AVI, MOV, MKV, WMV, FLV, MPEG, MPG, or compatible DAV/H264/TS DVR exports.")
-    if replace_clip_id:
-        try:
-            delete_clip(replace_clip_id)
-        except HTTPException:
-            pass
+    if MAX_VAULT_BYTES <= 0:
+        raise HTTPException(500, "DRISHTI_MAX_VAULT_BYTES must be a positive byte limit.")
+    existing_bytes = _vault_usage_bytes()
+    if existing_bytes >= MAX_VAULT_BYTES:
+        raise HTTPException(413, "Local evidence storage limit reached. Remove authorized records or increase DRISHTI_MAX_VAULT_BYTES.")
     clip_id = uuid.uuid4().hex
     path = store.UPLOADS / f"{clip_id}{suffix}"
     size = 0
@@ -951,6 +964,8 @@ async def upload_clip(request: Request, filename: str, camera_id: str = "ATM-01"
                 size += len(chunk)
                 if size > MAX_UPLOAD_BYTES:
                     raise HTTPException(413, "Maximum clip size is 500 MB.")
+                if existing_bytes + size * 2 > MAX_VAULT_BYTES:
+                    raise HTTPException(413, "Upload would exceed the local evidence storage limit, including a review copy.")
                 output.write(chunk)
         if size == 0:
             raise HTTPException(400, "The uploaded clip is empty.")
@@ -999,12 +1014,23 @@ async def upload_clip(request: Request, filename: str, camera_id: str = "ATM-01"
                 f"Local clip uploaded: {original[:100]} ({size} bytes, SHA-256 {source_digest[:16]}…)",
                 now(),
             )
+        if replace_clip_id:
+            try:
+                delete_clip(replace_clip_id)
+            except Exception:
+                pass
         return _public_clip(record)
     except Exception:
         path.unlink(missing_ok=True)
         normalized_path = store.UPLOADS / f"{clip_id}-normalized.mp4"
         normalized_path.unlink(missing_ok=True)
         raise
+
+
+@app.post("/api/clips", status_code=201)
+async def upload_clip(request: Request, filename: str, camera_id: str = "ATM-01", replace_clip_id: str = "") -> dict:
+    async with upload_lock:
+        return await _upload_clip_locked(request, filename, camera_id, replace_clip_id)
 
 
 @app.get("/api/clips/{clip_id}/video")
