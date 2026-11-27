@@ -123,6 +123,13 @@ def init_db() -> None:
                 attempts INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS portal_auth_attempts (
+                identifier_hash TEXT NOT NULL,
+                remote_hash TEXT NOT NULL,
+                attempted_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_portal_auth_attempts_time
+                ON portal_auth_attempts(attempted_at);
             CREATE TABLE IF NOT EXISTS security_rules (
                 id TEXT PRIMARY KEY,
                 code TEXT NOT NULL UNIQUE,
@@ -235,4 +242,18 @@ def init_db() -> None:
                 ) VALUES(?,?,?,?,?,?,?,?,?,?)""",
                 (atm_id, name, loc, "", "", "", "", p1, p2, stamp),
             )
+
+
+def remove_demo_accounts() -> None:
+    with connect() as db:
+        db.execute("DELETE FROM portal_otp_challenges")
+        db.execute("UPDATE portal_users SET verification_status='pending' WHERE aadhaar_verified=1")
+        db.execute("UPDATE portal_users SET aadhaar_verified=0, aadhaar_masked='', aadhaar_ref_hash=''")
+        db.execute("""UPDATE atm_assignments SET
+            guard_user_id = CASE WHEN guard_user_id IN ('guard-101','guard-102') THEN '' ELSE guard_user_id END,
+            admin_user_id = CASE WHEN admin_user_id = 'atm-admin-201' THEN '' ELSE admin_user_id END,
+            govt_user_id = CASE WHEN govt_user_id IN ('govt-301','govt-302') THEN '' ELSE govt_user_id END,
+            backup_govt_user_id = CASE WHEN backup_govt_user_id = 'govt-302' THEN '' ELSE backup_govt_user_id END""")
+        db.execute("""DELETE FROM portal_users WHERE employee_id IN
+            ('EMP-GRD-101','EMP-GRD-102','EMP-ADM-201','EMP-GOV-301','EMP-GOV-302','EMP-SUP-001')""")
 

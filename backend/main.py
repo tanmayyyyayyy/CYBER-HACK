@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import contextvars
 import csv
 import hashlib
@@ -19,7 +20,7 @@ import uuid
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import quote
 
@@ -34,9 +35,10 @@ from reportlab.lib.pagesizes import A4
 from reportlab.lib.utils import ImageReader
 from reportlab.pdfgen import canvas
 
-from backend import analysis, auth, blockchain, forensics, store, streams
+from backend import analysis, auth, blockchain, forensics, integrations, store, streams
 from backend.security import encrypt_snapshot, sign_manifest, verify_manifest
 from security_portal import router as security_portal_router
+from security_portal import store as portal_store
 
 APP_NAME = "Drishti Forensic Review"
 ALLOWED_EXTENSIONS = {
@@ -44,14 +46,29 @@ ALLOWED_EXTENSIONS = {
     ".dav", ".h264", ".264", ".ts", ".m4v", ".asf", ".vob",
 }
 MAX_UPLOAD_BYTES = 500 * 1024 * 1024
+MAX_VAULT_BYTES = int(os.environ.get("DRISHTI_MAX_VAULT_BYTES", str(20 * 1024 * 1024 * 1024)))
 LOCAL_ORIGINS = ["http://127.0.0.1:5174", "http://localhost:5174"]
 
 analysis_pool: ThreadPoolExecutor | None = None
+upload_lock = asyncio.Lock()
+
+
+def _vault_usage_bytes() -> int:
+    total = 0
+    for path in store.DATA.rglob("*"):
+        try:
+            if path.is_file() and not path.is_symlink():
+                total += path.stat().st_size
+        except OSError:
+            continue
+    return total
 
 
 def startup() -> None:
     global analysis_pool
     store.init_db()
+    portal_store.init_db()
+    portal_store.remove_demo_accounts()
     analysis_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="drishti-analysis")
     with store.connect() as db:
         interrupted = db.execute("SELECT id FROM analyses WHERE status IN ('queued','running')").fetchall()
@@ -459,7 +476,7 @@ async def add_security_headers(request: Request, call_next):
     response.headers.setdefault("Referrer-Policy", "no-referrer")
     response.headers.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
     response.headers.setdefault("Cross-Origin-Resource-Policy", "same-origin")
-    if request.url.path.startswith("/api/"):
+    if request.url.path.startswith(("/api/", "/sec-api/")):
         response.headers["Cache-Control"] = "no-store"
     else:
         response.headers.setdefault(
@@ -639,7 +656,7 @@ def security_overview(request: Request) -> dict:
         ),
         "signingKey": {"present": store.SIGNING_KEY_PATH.is_file(), "permissions": _safe_mode(store.SIGNING_KEY_PATH)},
         "hostEncryption": {
-            "status": "verify",
+            "status": integrations.capability_status()["features"]["activeStorageEncryption"]["mode"],
             "message": "Enable FileVault, BitLocker, or LUKS on the host volume; this app does not manage the device key.",
         },
         "networkBoundary": {
@@ -661,6 +678,64 @@ def security_verify_manifest(payload: ManifestVerifyRequest, request: Request) -
             now(),
         )
     return result
+
+
+@app.post("/api/security/audit-checkpoint")
+def create_remote_audit_checkpoint(request: Request) -> dict:
+    admin = require_admin(request)
+    with store.connect() as db:
+        head = db.execute("SELECT entry_hash FROM audit_log ORDER BY rowid DESC LIMIT 1").fetchone()
+        count = db.execute("SELECT COUNT(*) FROM audit_log").fetchone()[0]
+    checkpoint = {
+        "schemaVersion": 1,
+        "createdAt": now(),
+        "host": socket.gethostname(),
+        "entryCount": count,
+        "headHash": head["entry_hash"] if head else "",
+    }
+    remote = integrations.send_audit_checkpoint(checkpoint)
+    with store.connect() as db:
+        store.append_audit(
+            db,
+            "security.audit_checkpoint",
+            admin["id"],
+            f"External checkpoint status={remote['status']}; entries={count}; head={checkpoint['headHash'][:16]}",
+            now(),
+        )
+    return {
+        "checkpoint": checkpoint,
+        "remote": remote,
+        "meaning": "A remote 2xx response means the configured endpoint accepted this signed chain-head checkpoint. It does not validate evidence content or legal admissibility.",
+    }
+
+
+@app.get("/api/security/retention")
+def retention_preview(request: Request) -> dict:
+    require_admin(request)
+    feature = integrations.capability_status()["features"]["retention"]
+    if feature["mode"] != "configured":
+        return {**feature, "eligibleClips": 0, "cutoff": None, "message": "Mock mode: no retention action is available until DRISHTI_RETENTION_DAYS is a positive integer."}
+    cutoff = datetime.now(timezone.utc) - timedelta(days=feature["days"])
+    cutoff_iso = cutoff.isoformat(timespec="seconds")
+    with store.connect() as db:
+        eligible = db.execute("SELECT COUNT(*) FROM clips WHERE uploaded_at < ?", (cutoff_iso,)).fetchone()[0]
+    return {**feature, "eligibleClips": eligible, "cutoff": cutoff_iso, "message": "Preview only. Retention runs only when an administrator explicitly requests it."}
+
+
+@app.post("/api/security/retention/run")
+def retention_run(request: Request) -> dict:
+    admin = require_admin(request)
+    feature = integrations.capability_status()["features"]["retention"]
+    if feature["mode"] != "configured":
+        return {**feature, "deletedClips": 0, "message": "Mock mode: no records were deleted. Configure a positive DRISHTI_RETENTION_DAYS value."}
+    cutoff_iso = (datetime.now(timezone.utc) - timedelta(days=feature["days"])).isoformat(timespec="seconds")
+    with store.connect() as db:
+        expired = [row[0] for row in db.execute("SELECT id FROM clips WHERE uploaded_at < ? ORDER BY uploaded_at", (cutoff_iso,)).fetchall()]
+    for clip_id in expired:
+        delete_clip(clip_id)
+    with store.connect() as db:
+        store.append_audit(db, "security.retention_run", admin["id"], f"Manually deleted {len(expired)} clips older than {cutoff_iso}", now(), actor_id=admin["id"])
+    return {"mode": "configured", "status": "completed", "deletedClips": len(expired), "cutoff": cutoff_iso, "message": "Clip-derived video, analysis, event, and candidate files were removed. This does not delete live identity or incident records."}
 
 
 @app.get("/api/security/compliance-report.json")
@@ -878,6 +953,7 @@ def health() -> dict:
         "ffmpeg": bool(shutil.which("ffmpeg")),
         "ffprobe": bool(shutil.which("ffprobe")),
         "cloud": "disabled",
+        "runtime": integrations.capability_status(),
     }
 
 
@@ -926,19 +1002,18 @@ def camera_slots() -> list[dict]:
     ]
 
 
-@app.post("/api/clips", status_code=201)
-async def upload_clip(request: Request, filename: str, camera_id: str = "ATM-01", replace_clip_id: str = "") -> dict:
+async def _upload_clip_locked(request: Request, filename: str, camera_id: str, replace_clip_id: str) -> dict:
     original = Path(filename).name.strip()
     suffix = Path(original).suffix.lower()
     if camera_id not in {"ATM-01", "ATM-02", "ATM-03", "ATM-04"}:
         raise HTTPException(422, "Choose one of the four local ATM camera channels.")
     if suffix not in ALLOWED_EXTENSIONS:
         raise HTTPException(415, "Use MP4, AVI, MOV, MKV, WMV, FLV, MPEG, MPG, or compatible DAV/H264/TS DVR exports.")
-    if replace_clip_id:
-        try:
-            delete_clip(replace_clip_id)
-        except HTTPException:
-            pass
+    if MAX_VAULT_BYTES <= 0:
+        raise HTTPException(500, "DRISHTI_MAX_VAULT_BYTES must be a positive byte limit.")
+    existing_bytes = _vault_usage_bytes()
+    if existing_bytes >= MAX_VAULT_BYTES:
+        raise HTTPException(413, "Local evidence storage limit reached. Remove authorized records or increase DRISHTI_MAX_VAULT_BYTES.")
     clip_id = uuid.uuid4().hex
     path = store.UPLOADS / f"{clip_id}{suffix}"
     size = 0
@@ -948,6 +1023,8 @@ async def upload_clip(request: Request, filename: str, camera_id: str = "ATM-01"
                 size += len(chunk)
                 if size > MAX_UPLOAD_BYTES:
                     raise HTTPException(413, "Maximum clip size is 500 MB.")
+                if existing_bytes + size * 2 > MAX_VAULT_BYTES:
+                    raise HTTPException(413, "Upload would exceed the local evidence storage limit, including a review copy.")
                 output.write(chunk)
         if size == 0:
             raise HTTPException(400, "The uploaded clip is empty.")
@@ -996,12 +1073,23 @@ async def upload_clip(request: Request, filename: str, camera_id: str = "ATM-01"
                 f"Local clip uploaded: {original[:100]} ({size} bytes, SHA-256 {source_digest[:16]}…)",
                 now(),
             )
+        if replace_clip_id:
+            try:
+                delete_clip(replace_clip_id)
+            except Exception:
+                pass
         return _public_clip(record)
     except Exception:
         path.unlink(missing_ok=True)
         normalized_path = store.UPLOADS / f"{clip_id}-normalized.mp4"
         normalized_path.unlink(missing_ok=True)
         raise
+
+
+@app.post("/api/clips", status_code=201)
+async def upload_clip(request: Request, filename: str, camera_id: str = "ATM-01", replace_clip_id: str = "") -> dict:
+    async with upload_lock:
+        return await _upload_clip_locked(request, filename, camera_id, replace_clip_id)
 
 
 @app.get("/api/clips/{clip_id}/video")

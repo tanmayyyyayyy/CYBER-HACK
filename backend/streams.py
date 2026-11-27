@@ -5,6 +5,7 @@ import base64
 import collections
 import concurrent.futures
 import hashlib
+import ipaddress
 import json
 import logging
 import os
@@ -104,9 +105,56 @@ STREAM_CATALOG: list[dict[str, str]] = [
     },
 ]
 
-_ALLOWED_STREAM_URL = re.compile(r"^(https?|rtsp)://[^\s]+$", re.IGNORECASE)
+_ALLOWED_STREAM_URL = re.compile(r"^https?://[^\s]+$", re.IGNORECASE)
 _BARE_HOST_OR_IP = re.compile(r"^(\[[0-9a-fA-F:]+\]|[a-zA-Z0-9.-]+)(:\d{2,5})(/[^\s]*)?$")
 _VIDEO_FILE_EXTS = (".mp4", ".avi", ".mov", ".mkv", ".webm", ".flv", ".wmv", ".ts", ".m4v", ".dav")
+
+
+def _validate_camera_url(url: str) -> None:
+    parts = urlsplit(url)
+    if parts.scheme.lower() not in {"http", "https"} or not parts.hostname or parts.fragment:
+        raise ValueError("Use an HTTP(S) camera URL on a private network. RTSP is disabled until its redirect behavior can be constrained.")
+    try:
+        address = ipaddress.ip_address(parts.hostname)
+        port = parts.port
+    except ValueError as exc:
+        raise ValueError("Camera URLs must use a private-network IP address and a valid port.") from exc
+    configured = os.environ.get("DRISHTI_CAMERA_NETWORKS", "")
+    if not configured.strip():
+        raise ValueError("Set DRISHTI_CAMERA_NETWORKS to the authorized camera subnet before connecting IP cameras.")
+    try:
+        networks = [ipaddress.ip_network(item.strip(), strict=False) for item in configured.split(",") if item.strip()]
+    except ValueError as exc:
+        raise ValueError("DRISHTI_CAMERA_NETWORKS must contain valid comma-separated private CIDR ranges.") from exc
+    if (not address.is_private or address.is_loopback or address.is_link_local or
+            address.is_multicast or address.is_unspecified or address.is_reserved or
+            str(address) in {"169.254.169.254", "fd00:ec2::254"}):
+        raise ValueError("Camera URL must point to a private network address, not a local, link-local, or public service.")
+    if not any(address.version == network.version and address in network and network.is_private for network in networks):
+        raise ValueError("Camera IP is outside DRISHTI_CAMERA_NETWORKS.")
+    if port is not None and not 1 <= port <= 65535:
+        raise ValueError("Camera URL port is outside the valid range.")
+
+
+def _safe_camera_url(url: str) -> str:
+    parts = urlsplit(url)
+    host = parts.hostname or ""
+    if ":" in host:
+        host = f"[{host}]"
+    port = f":{parts.port}" if parts.port else ""
+    return f"{parts.scheme}://{host}{port}"
+
+
+class _CameraRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        _validate_camera_url(newurl)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def _open_camera_url(request: urllib.request.Request, timeout: float):
+    _validate_camera_url(request.full_url)
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _CameraRedirectHandler())
+    return opener.open(request, timeout=timeout)
 
 
 def _normalize_stream_source(raw: str) -> str:
@@ -118,12 +166,15 @@ def _normalize_stream_source(raw: str) -> str:
     if cleaned.isdigit() and 0 <= int(cleaned) <= 4:
         return cleaned
     if _ALLOWED_STREAM_URL.match(cleaned):
+        _validate_camera_url(cleaned)
         return cleaned
-    # Allow pasting IP:port directly from Android IP Webcam / DroidCam (e.g. 192.0.0.4:8080 or 192.168.1.50:8080/video)
+    # Allow pasting a private camera IP and port directly from Android IP Webcam / DroidCam.
     if _BARE_HOST_OR_IP.match(cleaned):
-        return f"http://{cleaned}"
+        normalized = f"http://{cleaned}"
+        _validate_camera_url(normalized)
+        return normalized
     raise ValueError(
-        "Enter a valid IP Webcam URL (e.g. http://192.168.1.50:8080 or /video, 192.0.0.4:8080, rtsp://...), camera index (0-4), 'default', or 'clear'."
+        "Enter a valid private IP Webcam URL, camera index (0-4), 'default', or 'clear'."
     )
 
 
@@ -156,7 +207,7 @@ def _probe_single_ipcam_origin(base_url: str, timeout: float = 1.0) -> dict[str,
         test_url = f"{base_url.rstrip('/')}{path}"
         req = urllib.request.Request(test_url, headers={"User-Agent": "Drishti-CCTV/1.0"})
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
+            with _open_camera_url(req, timeout=timeout) as resp:
                 ctype = (resp.headers.get("Content-Type") or "").lower()
                 server = resp.headers.get("Server") or ""
                 if "image/" in ctype or "multipart" in ctype or "ip webcam" in server.lower():
@@ -174,9 +225,8 @@ def _probe_single_ipcam_origin(base_url: str, timeout: float = 1.0) -> dict[str,
 
 def discover_local_ipcams(ports: tuple[int, ...] = (8080, 4747, 8081)) -> list[dict[str, str]]:
     """
-    Scan 1-hop local Wi-Fi / hotspot neighbors (both IPv4 ARP and IPv6 NDP link-local
-    like fe80::...%en0) to automatically find running Android IP Webcam / DroidCam feeds,
-    especially when mobile hotspot 464XLAT (192.0.0.4) blocks direct IPv4 routing.
+    Scan local IPv4 ARP and IPv6 ULA neighbors for camera feeds. Every probe is still
+    checked against the configured private camera CIDR allowlist.
     """
     hosts: list[str] = []
     # Trigger a quick link-local multicast ping on common Wi-Fi interfaces so mobile phones appear in ndp -an
@@ -199,9 +249,7 @@ def discover_local_ipcams(ports: tuple[int, ...] = (8080, 4747, 8081)) -> list[d
             if not parts or "permanent" in line:
                 continue
             addr = parts[0]
-            if addr.startswith("fe80::") and "%" in addr and addr not in hosts:
-                hosts.append(f"[{addr}]")
-            elif (addr.startswith("2409:") or addr.startswith("2405:") or addr.startswith("2001:")) and addr not in hosts:
+            if addr.lower().startswith(("fc", "fd")) and addr not in hosts:
                 hosts.append(f"[{addr}]")
     except Exception:
         pass
@@ -278,7 +326,8 @@ class _HttpCameraClient:
 
     @staticmethod
     def _format_error(exc: Exception, url: str) -> str:
-        host = urlsplit(url).netloc or url
+        parts = urlsplit(url)
+        host = f"{parts.hostname or 'camera'}:{parts.port}" if parts.port else (parts.hostname or "camera")
         if isinstance(exc, urllib.error.HTTPError):
             if exc.code == 401:
                 return f"HTTP 401 auth required on {host} — disable login or use http://user:pass@{host}"
@@ -286,8 +335,6 @@ class _HttpCameraClient:
         msg = str(getattr(exc, "reason", exc))
         low = msg.lower()
         if "timed out" in low or isinstance(exc, TimeoutError):
-            if host.startswith("192.0.0."):
-                return f"Timed out reaching {host} (Jio/carrier 192.0.0.x hotspot blocks IPv4; use Wi-Fi router or IPv6)"
             return f"Timed out reaching {host} — check same Wi-Fi & IP Webcam 'Start server'"
         if "refused" in low:
             return f"Connection refused by {host} — tap 'Start server' in IP Webcam app"
@@ -299,7 +346,7 @@ class _HttpCameraClient:
         with self._lock:
             self._frame = frame
             self._frame_ts = time.monotonic()
-            self._connected_url = endpoint
+            self._connected_url = _safe_camera_url(endpoint)
             self._last_error = ""
 
     def _set_error(self, msg: str) -> None:
@@ -340,10 +387,10 @@ class _HttpCameraClient:
         got_any = False
         while not self._stop.is_set():
             try:
-                with urllib.request.urlopen(self._build_request(candidate), timeout=2.2) as resp:
+                with _open_camera_url(self._build_request(candidate), timeout=2.2) as resp:
                     ctype = (resp.headers.get("Content-Type") or "").lower()
                     if "html" in ctype:
-                        self._set_error(f"{candidate} returned HTML page instead of video")
+                        self._set_error(f"{_safe_camera_url(candidate)} returned HTML page instead of video")
                         return False
                     raw = resp.read(4_194_304)
                 arr = np.frombuffer(raw, dtype=np.uint8)
@@ -370,7 +417,7 @@ class _HttpCameraClient:
                 if self._stop.is_set():
                     break
                 try:
-                    with urllib.request.urlopen(self._build_request(candidate), timeout=2.2) as resp:
+                    with _open_camera_url(self._build_request(candidate), timeout=2.2) as resp:
                         ctype = (resp.headers.get("Content-Type") or "").lower()
                         if "html" in ctype or "text/" in ctype:
                             self._set_error(f"{urlsplit(candidate).path or '/'} is webpage, trying /video & /shot.jpg...")
@@ -397,8 +444,8 @@ class _HttpCameraClient:
                     if isinstance(exc, (TimeoutError, ConnectionRefusedError)) or "timed out" in msg_l or "refused" in msg_l or "unreachable" in msg_l:
                         saw_network_unreachable = "refused" not in msg_l
                         break
-            # When mobile hotspot IPv4 (e.g. 192.0.0.4) fails, auto-discover the phone over local IPv6 hotspot link!
-            if not any_success and not self._stop.is_set() and (saw_network_unreachable or urlsplit(self.url).hostname == "192.0.0.4"):
+            # If a camera IP is unreachable, try another host on the explicitly allowed local subnet.
+            if not any_success and not self._stop.is_set() and saw_network_unreachable:
                 if not tried_neighbor_fallback or not preferred:
                     tried_neighbor_fallback = True
                     port = urlsplit(self.url).port or 8080
@@ -897,7 +944,7 @@ class LocalSurveillanceManager:
             if state.custom_source.isdigit():
                 return int(state.custom_source), f"Live Camera #{state.custom_source}", True
             display = state.resolved_source or state.custom_source
-            return state.custom_source, f"IP Webcam ({display[:42]})", True
+            return state.custom_source, f"IP Webcam ({_safe_camera_url(display)[:42]})", True
 
         if state.cleared:
             return None, "Slot empty (add footage or IP Webcam)", False
@@ -1577,7 +1624,7 @@ class LocalSurveillanceManager:
                                 with self._lock:
                                     self._reset_live_state(state)
                                     state.status = "reconnecting"
-                                    err_hint = "Check RTSP/USB camera index & macOS camera permission" if isinstance(src_val, int) else "Waiting for RTSP / live stream packets"
+                                    err_hint = "Check USB camera index & device permission" if isinstance(src_val, int) else "Waiting for HTTP camera frames"
                                     state.last_connect_error = err_hint
                                     state.latest_jpeg = self._placeholder_jpeg(state, f"Connecting to {src_label}...", err_hint)
                                 cap.release()
@@ -1710,8 +1757,8 @@ class LocalSurveillanceManager:
                     "sourceAdapter": state.meta["sourceAdapter"],
                     "sourceLabel": src_label,
                     "trackingEngine": state.tracker_label if state.last_read_at else "",
-                    "customSource": state.custom_source,
-                    "resolvedSource": state.resolved_source,
+                    "customSource": _safe_camera_url(state.custom_source) if "://" in state.custom_source else state.custom_source,
+                    "resolvedSource": _safe_camera_url(state.resolved_source) if state.resolved_source else "",
                     "lastError": state.last_connect_error,
                     "isLiveCamera": is_live,
                     "sourceAvailable": src_val is not None,

@@ -1,0 +1,14 @@
+Place your raw MP4 / MOV / AVI / MKV video files here.
+
+Supported extensions: .mp4 .mov .avi .mkv .3gp .m4v .wmv .mpg .mpeg .flv .webm
+
+After placing your videos run:
+  python3 PS04_demo_data/_tools/build_ps04.py init PS04_demo_data/
+
+This will scan this folder and generate a clip_manifest.csv template.
+Fill in the blank columns (person_id, role, timestamp offsets, etc.)
+then run:
+  python3 PS04_demo_data/_tools/build_ps04.py build PS04_demo_data/
+
+See PS04_demo_data/HOW_TO_USE_YOUR_VIDEOS.md for full instructions.
+

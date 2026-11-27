@@ -1,11 +1,62 @@
+# Python environments, bytecode, and tool caches
 .venv/
-node_modules/
-dist/
-backend/data/
-models/*.pt
-models/*.onnx
+venv/
+env/
 __pycache__/
 *.py[cod]
-.DS_Store
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+.coverage
+htmlcov/
+.tox/
+.nox/
+
+# Node / frontend output
+node_modules/
+dist/
+coverage/
+.vite/
+.npm/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Local databases, evidence, and generated demo media
+backend/data/
+security_portal/data/
+data/
+*.db
+*.sqlite
+*.sqlite3
+*.sqlite-*
+demo_feeds/*.mp4
+models/*.pt
+models/*.onnx
+
+# Secrets and local environment files (keep the safe template)
 .env
+.env.*
+!.env.example
+*.pem
+*.p12
+*.pfx
+
+# Local logs, exports, and temporary files
+*.log
+.startup-logs/
+/start-demo.ps1
+*.tmp
+*.part
+*.swp
+*.bak
+*.orig
+
+# OS metadata and local IDE state
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/*.local.json
 PS04_demo_data/

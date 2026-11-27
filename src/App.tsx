@@ -14,11 +14,23 @@ import {
   DatabaseBackup, EventItem, FaceVisibility, formatBytes, formatDuration, Health, JournalRow,
   LiveEvidenceResponse, LiveEvidenceSubject, LiveIncident, ReportsData, SecurityOverview, StreamDetection, StreamsResponse, WatchlistEntry,
 } from './api';
+import ResponseDesk from './ResponseDesk';
 import { Logo } from './Logo';
 
-type Page = 'surveillance' | 'desk' | 'intel' | 'library' | 'search' | 'reports' | 'audit' | 'review' | 'accounts' | 'security';
+type Page = 'surveillance' | 'desk' | 'intel' | 'library' | 'search' | 'reports' | 'audit' | 'review' | 'accounts' | 'security' | 'response';
 type Toast = { kind: 'success' | 'error'; message: string } | null;
 type SlotModalTarget = { channelId: string; streamId: string; replaceClipId?: string; mode?: 'file' | 'ipcam' } | null;
+const validPages = new Set<Page>(['surveillance', 'desk', 'intel', 'library', 'search', 'reports', 'audit', 'accounts', 'security', 'response']);
+const SESSION_SYNC_KEY = 'drishti-session-sync';
+
+function announceSessionChange() {
+  try { localStorage.setItem(SESSION_SYNC_KEY, `${Date.now()}`); } catch { /* Browser storage may be disabled. */ }
+}
+
+function initialPage(): Page {
+  const tab = new URLSearchParams(window.location.search).get('tab') as Page | null;
+  return tab && validPages.has(tab) ? tab : 'desk';
+}
 
 const pageCopy: Record<Page, { title: string; subtitle: string }> = {
   desk: { title: 'PS04 · ATM Suspect Face Extraction', subtitle: 'Link ATM CCTV / DVR footage to bank transaction timestamps, extract ranked suspect faces with quality flags & export sealed evidence.' },
@@ -31,12 +43,20 @@ const pageCopy: Record<Page, { title: string; subtitle: string }> = {
   review: { title: 'Evidence review', subtitle: 'Compare raw and enhanced frames, inspect lighting, redact bystanders, flag suspect & seal evidence.' },
   accounts: { title: 'Access control', subtitle: 'Approve local investigator accounts and revoke access.' },
   security: { title: 'Security center', subtitle: 'Database health, SHA-256 sweeps, AES-256-GCM backups, and manifest seal verification.' },
+  response: { title: 'Authority response desk', subtitle: 'Demonstrate alert triage, investigator handoff, and activity history using a fictional incident.' },
 };
 
 function App() {
   const [user, setUser] = useState<AuthUser | null>(null);
   const [setupRequired, setSetupRequired] = useState(false);
   const [authLoading, setAuthLoading] = useState(true);
+  useEffect(() => {
+    const syncSession = (event: StorageEvent) => {
+      if (event.key === SESSION_SYNC_KEY) window.location.reload();
+    };
+    window.addEventListener('storage', syncSession);
+    return () => window.removeEventListener('storage', syncSession);
+  }, []);
   useEffect(() => {
     let alive = true;
     void api.authBootstrap().then(async (bootstrap) => {
@@ -60,15 +80,15 @@ function App() {
   }, []);
 
   const signOut = async () => {
-    try { await api.authLogout(); } finally { setUser(null); }
+    try { await api.authLogout(); } finally { announceSessionChange(); setUser(null); }
   };
   if (authLoading) return <div className="auth-loading"><Logo variant="lockup" /><span>Checking local access…</span></div>;
-  if (!user) return <AuthPortal setupRequired={setupRequired} onAuthenticated={(account) => { setSetupRequired(false); setUser(account); }} />;
+  if (!user) return <AuthPortal setupRequired={setupRequired} onAuthenticated={(account) => { announceSessionChange(); setSetupRequired(false); setUser(account); }} />;
   return <Workspace user={user} onSignOut={signOut} />;
 }
 
 function Workspace({ user, onSignOut }: { user: AuthUser; onSignOut: () => Promise<void> }) {
-  const [page, setPage] = useState<Page>('desk');
+  const [page, setPage] = useState<Page>(initialPage);
   const [clips, setClips] = useState<Clip[]>([]);
   const [cameras, setCameras] = useState<CameraSlot[]>([]);
   const [analyses, setAnalyses] = useState<Analysis[]>([]);
@@ -196,6 +216,7 @@ function Workspace({ user, onSignOut }: { user: AuthUser; onSignOut: () => Promi
       <NavItem active={page === 'desk' || page === 'review'} label="Case desk" icon={<House size={15} />} onClick={() => { setPage('desk'); setSmallNavOpen(false); }} />
       <NavItem active={page === 'surveillance'} label="Real-time AI" icon={<Radio size={15} />} count={streamsState?.running ? 4 : undefined} onClick={() => { setPage('surveillance'); setSmallNavOpen(false); }} />
       <NavItem active={page === 'intel'} label="Case intel" icon={<ShieldAlert size={15} />} count={watchlist.length || undefined} onClick={() => { setPage('intel'); setSmallNavOpen(false); }} />
+      <NavItem active={page === 'response'} label="Response desk" icon={<Bell size={15} />} onClick={() => { setPage('response'); setSmallNavOpen(false); }} />
       <NavItem active={page === 'library'} label="Video library" icon={<Camera size={15} />} count={clips.length || undefined} onClick={() => { setPage('library'); setSmallNavOpen(false); }} />
       <NavItem active={page === 'search'} label="Face search" icon={<ScanFace size={15} />} onClick={() => openSearch()} />
       <NavItem active={page === 'reports'} label="Reports" icon={<BarChart3 size={15} />} onClick={() => { setPage('reports'); setSmallNavOpen(false); }} />
@@ -252,12 +273,19 @@ function Workspace({ user, onSignOut }: { user: AuthUser; onSignOut: () => Promi
       </aside>
       {smallNavOpen && <button className="nav-scrim" aria-label="Close navigation" onClick={() => setSmallNavOpen(false)} />}
 
+      {health?.runtime.mode === 'mock' && (
+        <div className="mock-mode-banner" role="status">
+          <AlertTriangle size={17} />
+          <div><strong>MOCK / DEMONSTRATION MODE</strong><span>External identity, dispatch, and independent audit are unavailable unless configured. Storage encryption is not verified; legal and model validation are incomplete. Do not use real investigative footage.</span></div>
+        </div>
+      )}
+
       <main className="main-column">
         <div className="page-wrap">
           <div className="page-heading">
             <div><h1>{pageMeta.title}</h1><p>{pageMeta.subtitle}</p></div>
             <div className="page-actions">
-              <span className="local-chip"><LockKeyhole size={14} /> AIR-GAPPED LOCAL</span>
+              <span className="local-chip"><LockKeyhole size={14} /> LOCAL PROCESSING</span>
               <button className="button button-outline button-compact" onClick={() => void refresh(false)} disabled={refreshing}>
                 <RefreshCw size={15} className={refreshing ? 'spin' : ''} /> Refresh
               </button>
@@ -298,6 +326,7 @@ function Workspace({ user, onSignOut }: { user: AuthUser; onSignOut: () => Promi
               onToast={setToast}
             />
           )}
+          {page === 'response' && <ResponseDesk user={user} clips={clips} analyses={analyses} audit={audit} auditIntegrity={auditIntegrity} onReview={openReview} />}
           {page === 'library' && (
             <Library
               clips={clips}
@@ -382,7 +411,7 @@ function SlotSourceModal({ target, onClose, onChooseUpload, onConnectIpCam }: {
             </button>
             <button type="button" className="slot-modal-option" onClick={() => setTab('ipcam')}>
               <strong><Radio size={17} /> Connect IP Webcam / USB Cam</strong>
-              <span>Paste Android IP Webcam (`http://...:8080` or `/video`), DroidCam, RTSP, or camera `0`.</span>
+              <span>Paste a private IP Webcam address after configuring the allowed camera subnet, or use camera `0`.</span>
             </button>
           </div>
         ) : (
@@ -647,7 +676,7 @@ function SurveillanceWall({ state, events, watchlist, onRefresh, onOpenSlotModal
           <button type="button" className="button button-outline button-compact" disabled={camSaving} onClick={() => { setIpUrl(''); void applyCameraSource(camTarget, 'default'); }}>
             <RotateCcw size={14} /> Reset Slot
           </button>
-          <span className="ipcam-hint">IP Webcam / DroidCam: paste <code>http://&lt;phone-ip&gt;:8080</code> or <code>192.168.x.x:8080</code> (auto-finds <code>/video</code> &amp; <code>/shot.jpg</code>)</span>
+          <span className="ipcam-hint">IP Webcam / DroidCam: paste a private IP such as <code>192.168.1.50:8080</code> after setting <code>DRISHTI_CAMERA_NETWORKS</code> (auto-finds <code>/video</code> and <code>/shot.jpg</code>)</span>
         </form>
       </div>
 

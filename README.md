@@ -2,11 +2,15 @@
 
 **Drishti** is a local-first video analytics and forensic evidence review workstation built for **Rajasthan Police Cyber Security Hackathon 2026 — PS04 (ATM CCTV Suspect Face Extraction for Card & ATM Fraud Investigation)**.
 
+> **Project status: hackathon demonstrator.** It is not approved for operational surveillance, handling real citizen footage, dispatching guards, or submitting generated files as statutory evidence. Demo outputs, face matches, alerts, and certificates require independent validation and authorized human review.
+
 It ingests ATM CCTV footage (including proprietary DVR/NVR exports), links clips to bank transaction timestamps or Electronic Journal (EJ) logs, tracks people inside the ATM keypad/cash-slot zone, ranks the clearest candidate face frames with occlusion/quality flags, searches across clips via **SFace 128-D** deep face embeddings, and exports **BSA Section 63 Certificates**, **Sealed PDF Evidence Sheets**, **DPDP Bystander-Redacted Frames**, and **Offline Forensic Case Bundles (`.zip`)**.
 
 Alongside the primary PS04 clip-forensic workflow, Drishti includes a sandboxed **Local Real-Time AI Console** (`Real-time AI`) capable of monitoring local clips, USB cameras, or Android IP Webcams—automatically collecting face evidence & suspicious incident snapshots into SQLite and alerting when the same person returns repeatedly.
 
 > **PS04 scope:** The interface is Rajasthan Police-inspired and has no official affiliation. Video processing and evidence storage run locally. Optional blockchain verification contacts the configured node. The on-chain record contains a manifest fingerprint and format marker. Quality scores and watchlist alerts require human review.
+
+Cryptographic hashes and local HMAC seals detect some changes but are not independent signatures or immutable chain-of-custody records. Generating a BSA Section 63 certificate PDF or a DPDP-labeled redacted frame does not establish legal compliance. The portal's siren is browser audio; there is no real SMS, phone, police, or guard dispatch integration.
 
 ---
 
@@ -39,7 +43,7 @@ Alongside the primary PS04 clip-forensic workflow, Drishti includes a sandboxed 
   - **Offline Forensic Case Bundle `.zip` (`/api/evidence/{id}/bundle.zip`):** Single-click archive containing both PDFs, signed `evidence-manifest.json`, `case-dossier.json`, signed `audit-trail.json`, raw & enhanced stills, top bystander-redacted DPDP frame, and `VERIFY-OFFLINE.txt`.
 
 ### 5. Local Real-Time AI Console, Auto DB Evidence & Repeat-Person Alerting ([`backend/streams.py`](backend/streams.py))
-- **Sandboxed 4-Stream Control Room (`Real-time AI`):** Auto-starts on server boot across `CAM-01`–`CAM-04` (`2` local demo feeds + `2` open slots for video files, Android **IP Webcam** URLs like `http://<phone-ip>:8080/video`, `rtsp://...`, or Mac/USB camera indices `0–4`), plus `120`-frame rolling-buffer clip capture. Zero live bank CCTV connection.
+- **Sandboxed 4-Stream Control Room (`Real-time AI`):** Auto-starts on server boot across `CAM-01`–`CAM-04` (`2` local demo feeds + `2` open slots for video files, Android **IP Webcam** HTTP(S) URLs on an explicitly allowlisted private subnet, or Mac/USB camera indices `0–4`), plus `120`-frame rolling-buffer clip capture. RTSP is disabled pending redirect-safe handling. Zero live bank CCTV connection.
 - **Automatic SQLite Evidence & Repeat-Person Alerting (`/api/live-evidence`):** Faces detected on clean raw frames (`>= 0.56` normalized SFace threshold) are automatically cropped, SHA-256 hashed, and stored under sequential IDs (`SUB-001`, `SUB-002`, ...) in `live_identities` + `live_sightings`. If the same person re-appears (`>= 8s` absence or `>= 2s` camera switch), Drishti increments their visit count, saves a fresh crop, and triggers a **`stream.repeat_person`** priority alert with 1-click **Arm** to the local watchlist.
 - **Incident evidence (`/api/live-incidents`):** Review hashed scene snapshots from live monitoring, including camera interference (`stream.camera_tamper`), ATM-zone dwell (`stream.atm_zone_dwell`), and guard welfare cues (`stream.guard_welfare_check`). Dwell and welfare cues are local review alerts.
 - **Camera interference:** A sustained obscured view, abrupt framing change, strong localized glare, or loss of a previously active feed can trigger an alert. The incident includes a timestamped snapshot and a recent face crop when available. The crop is context for review. It does not identify who caused the interference.
@@ -57,7 +61,7 @@ Drishti AI integrates over authenticated loopback REST APIs (`POST /sec-api/brid
 - **3-Tier Priority Escalation + Web Audio Siren:**
   `ATM Camera (Drishti) → Priority 1: Assigned On-Duty Guard (Siren + SLA Countdown) → Priority 2: ATM Admin / Owner → Priority 3: Backup Govt Security Official`.
 - **Camera-interference delivery:** The assigned guard, ATM administrator, and police liaison can see these alerts in their portal accounts. The portal uses the ATM assignment to route the alert and verifies the snapshot hash before serving it. Production dispatch, SMS, and automatic selection of a police station are outside this local workflow.
-- **Guard Management, 4-Role RBAC & Aadhaar-Style eKYC OTP Sandbox:** Separate role logins for `Guard`, `ATM Admin / Owner`, `Government / Security Official`, and `Super Admin`. Guard profiles hold Name, Employee/Guard ID, Mobile, Address, PIN Code, Assigned ATMs, Duty Timings, Emergency Contact, Verification Status, and a simulated Aadhaar OTP verification workflow that never stores raw 12-digit Aadhaar numbers (retaining only masked `XXXX-XXXX-last4` + HMAC ref).
+- **Guard Management & 4-Role RBAC:** Separate password-based roles for `Guard`, `ATM Admin / Owner`, `Government / Security Official`, and `Super Admin`. Guard profiles hold Name, Employee/Guard ID, Mobile, Address, PIN Code, Assigned ATMs, Duty Timings, Emergency Contact, and an administrator-managed verification status. No SMS OTP or Aadhaar eKYC integration is implemented.
 
 ---
 
@@ -108,11 +112,17 @@ Drishti AI integrates over authenticated loopback REST APIs (`POST /sec-api/brid
   - **UI:** `http://127.0.0.1:5174`
   - **OpenAPI Docs:** `http://127.0.0.1:8000/api/docs`
 
+Before attaching a network camera, set `DRISHTI_CAMERA_NETWORKS` to the camera subnet (for example, `192.168.1.0/24` in PowerShell or `export DRISHTI_CAMERA_NETWORKS=192.168.1.0/24` in a shell). Camera URLs must use an IP inside that private CIDR; DNS names, public IPs, loopback, and link-local addresses are rejected. Local USB camera indexes do not need this setting.
+
+Uploads are limited to 500 MB each and the local evidence directory defaults to a 20 GiB cap. Set `DRISHTI_MAX_VAULT_BYTES` to a positive byte count to change the cap. Keep adequate free disk space for temporary normalization copies.
+
 **Single-Bundle Local Serving:**
 ```bash
 npm run build
 .venv/bin/python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000
 ```
+
+The Security Portal does not create demo accounts. For a local demonstration, provision the first portal super admin interactively with `python scripts/provision_portal_admin.py`, then add other personnel from the portal. Do not use synthetic contact details or accounts for operational deployments.
 
 ---
 
@@ -131,6 +141,8 @@ npm.cmd run build
 ```
 
 For the blockchain demo, use `npm.cmd run blockchain:demo` to start the app on port `8001` with the local chain.
+
+On the maintainer's Windows workstation, the ignored local helper `start-demo.ps1` starts/reuses the three local services and opens each prototype view plus the Security Portal in a separate browser tab. Run it from the repository folder with `powershell -ExecutionPolicy Bypass -File .\start-demo.ps1`. The helper and its logs are intentionally excluded from Git; on a fresh clone, follow the setup commands above and start the services manually.
 
 ## Default OpenCV Zoo models
 
@@ -152,7 +164,7 @@ CYBER-HACK/
 │   ├── main.py          # FastAPI lifespan API, RBAC/CSRF middleware, EJ matcher, PDF/BSA63/Bundle ZIP exports
 │   ├── analysis.py      # MediaPipe person tracking, YuNet faces, SFace 128-D embeddings, quality/occlusion flags
 │   ├── forensics.py     # ffprobe metadata, FFmpeg DVR normalization, splice cues, CLAHE enhancement, DPDP blur
-│   ├── streams.py       # 4-stream local/IP-Webcam/RTSP monitor, DB evidence & repeat alerts, incident snapshots
+│   ├── streams.py       # 4-stream local/HTTP camera monitor, DB evidence & repeat alerts, incident snapshots
 │   ├── store.py         # SQLite WAL persistence, migrations, audit chain, dossier, watchlist & live evidence
 │   ├── security.py      # Path containment, security headers, AES-256-GCM backups, HMAC-SHA256 signing/verify
 │   └── auth.py          # scrypt password hashing, session cookies, CSRF tokens, hashed login throttling
@@ -169,8 +181,30 @@ CYBER-HACK/
 │   ├── restore_database.py  # Encrypted AES-256-GCM SQLite snapshot restore CLI
 │   └── run_ui_test_server.py# Local test server harness
 ├── demo_feeds/          # 4 compact local pilot feeds (cam_01_vestibule.mp4 .. cam_04_exit.mp4)
+├── PS04_demo_data/      # RPH26 PS04 Demo Dataset Builder, format samples, ATM master & consent forms
 └── docs/                # Pitch guide, architecture/integration notes, productization & UI test report
 ```
+
+---
+
+## PS04 Demo Dataset Builder (`PS04_demo_data/`)
+
+To test Drishti against realistic Rajasthan Police Hackathon 2026 (PS04) test cases — multi-codec DVR exports (`MP4`, `AVI MJPEG`, `MKV H.265`, `MOV`, `WMV`, `FLV`, `MPEG-2`, raw `.264`), clock offsets up to `+1h`, Dahua `.dav` (`DHAV`) error handling, and Electronic Journals (`_ej.txt` / bank CSVs):
+
+1. Copy raw ATM-style videos into [`PS04_demo_data/raw_videos/`](PS04_demo_data/raw_videos/PUT_YOUR_VIDEOS_HERE.txt).
+2. Generate the clip manifest:
+   ```bash
+   python3 PS04_demo_data/_tools/build_ps04.py init PS04_demo_data/
+   ```
+3. Fill in `person_id`, `role`, and second offsets in `PS04_demo_data/clip_manifest.csv` (see [`clip_manifest_TEMPLATE.csv`](PS04_demo_data/00_format_samples/clip_manifest_TEMPLATE.csv) and [`HOW_TO_USE_YOUR_VIDEOS.md`](PS04_demo_data/HOW_TO_USE_YOUR_VIDEOS.md)).
+4. Build the formatted clips, transaction logs, cases, and answer key:
+   ```bash
+   python3 PS04_demo_data/_tools/build_ps04.py build PS04_demo_data/
+   ```
+5. **Analyze in Drishti:**
+   - Upload clips from `PS04_demo_data/02_videos/<ATM_ID>/` (or `format_coverage/`) into **Case desk** / **Video library** — raw `.264` elementary streams are automatically normalized with accurate duration/FPS, and `02_videos/proprietary/UDR0019.export.dav` (`DHAV`) triggers vendor conversion instructions.
+   - Paste any generated `03_transactions/<ATM_ID>_ej.txt`, `<ATM_ID>_bank_statement.csv`, or standard CSV directly into **ATM Transaction Journal Matcher (`/api/journal/match`)** — Drishti parses `DD/MM/YYYY HH:MM:SS` EJ blocks, `DD-MM-YYYY` bank CSVs, and ISO timestamps natively.
+   - Cross-check extracted suspects via **Face search** (SFace 128-D) and **Sealed PDF / BSA Sec. 63 / Bundle `.zip`** exports against `99_answer_key/answer_key.csv`.
 
 ---
 

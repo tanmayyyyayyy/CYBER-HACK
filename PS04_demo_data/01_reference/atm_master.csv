@@ -1,0 +1,8 @@
+atm_id,bank,location,district,lat,long,camera_position,camera_resolution,dvr_make_model,dvr_export_profile,camera_clock_offset_sec,timezone_note,notes
+JPR0142,State Bank of India (demo),MI Road,Jaipur,26.9157,75.809,Above screen (face view),1280x720,Generic NVR (H.264 MP4 export),MP4_H264_720P,+18,IST,Clean export; small clock drift
+JPR0317,HDFC Bank (demo),Vaishali Nagar,Jaipur,26.9118,75.7431,Ceiling corner (angled),640x480,Old DVR (AVI MJPEG export),AVI_MJPEG_VGA,-74,IST,Older DVR; clock 74 s behind
+AJM0055,Punjab National Bank (demo),Vaishali Nagar,Ajmer,26.4708,74.64,Pinhole above keypad,1920x1080,Hybrid NVR (H.265 MKV export),MKV_H265_1080P,+5,IST,High resolution but H.265
+JDH0208,Bank of Baroda (demo),Sardarpura,Jodhpur,26.2737,73.0089,Lobby wide angle,1280x720,Generic NVR (MOV export),MOV_H264_720P,+132,IST,Clock 2 min 12 s ahead
+KOT0091,ICICI Bank (demo),Talwandi,Kota,25.146,75.8432,Above screen,640x360,Legacy DVR (WMV export),WMV_LOW_360P,-30,IST,Low bitrate
+UDR0019,Axis Bank (demo),Hiran Magri,Udaipur,24.559,73.7116,Ceiling corner (night IR),352x288,Legacy DVR (CIF MPEG-2 / raw H.264 export),DVR_CIF_NIGHT,+3600,UTC+6:30 misconfigured,CIF 6-8 fps grayscale IR; DVR clock set 1 hour ahead (wrong timezone)
+

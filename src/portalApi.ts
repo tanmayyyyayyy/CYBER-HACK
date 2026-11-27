@@ -13,8 +13,6 @@ export type PortalUser = {
   dutyTiming: string;
   emergencyContact: string;
   verificationStatus: 'pending' | 'verified' | 'suspended';
-  aadhaarVerified: boolean;
-  aadhaarMasked: string;
   status: 'active' | 'disabled';
   createdAt: string;
 };
@@ -116,7 +114,6 @@ async function secRequest<T>(path: string, init?: RequestInit): Promise<T> {
 
 export const portalApi = {
   health: () => secRequest<{ status: string; service: string; usersCount: number; activeAlerts: number; observations: number }>('/health'),
-  demoSeed: () => secRequest<{ seeded: number; accounts: { role: string; employeeId: string; email: string; hint: string }[] }>('/auth/demo-seed', { method: 'POST' }),
   me: async () => {
     const r = await secRequest<{ authenticated?: boolean; user: PortalUser | null; csrfToken: string }>('/auth/me');
     if (r.csrfToken) setPortalCsrf(r.csrfToken);
@@ -125,16 +122,6 @@ export const portalApi = {
   login: async (identifier: string, password: string) => {
     const r = await secRequest<{ user: PortalUser; csrfToken: string }>('/auth/login', {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ identifier, password }),
-    });
-    setPortalCsrf(r.csrfToken);
-    return r;
-  },
-  requestOtp: (identifier: string) => secRequest<{ challengeId: string; maskedMobile: string; demoOtpHint: string; notice: string }>('/auth/otp/request', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ identifier }),
-  }),
-  verifyOtp: async (challenge_id: string, otp: string) => {
-    const r = await secRequest<{ user: PortalUser; csrfToken: string }>('/auth/otp/verify', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ challenge_id, otp }),
     });
     setPortalCsrf(r.csrfToken);
     return r;
@@ -150,14 +137,6 @@ export const portalApi = {
   }) => secRequest<PortalUser>('/guards', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }),
   updateGuard: (id: string, payload: Record<string, unknown>) =>
     secRequest<PortalUser>(`/guards/${id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }),
-  requestAadhaarOtp: (userId: string, aadhaar_input: string) =>
-    secRequest<{ challengeId: string; aadhaarMasked: string; demoOtpHint: string; notice: string }>(`/guards/${userId}/aadhaar-otp/request`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ aadhaar_input }),
-    }),
-  verifyAadhaarOtp: (userId: string, challenge_id: string, otp: string) =>
-    secRequest<PortalUser>(`/guards/${userId}/aadhaar-otp/verify`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ challenge_id, otp }),
-    }),
   assignments: () => secRequest<AtmAssignment[]>('/assignments'),
   updateAssignment: (atmId: string, payload: Record<string, unknown>) =>
     secRequest<AtmAssignment>(`/assignments/${atmId}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }),

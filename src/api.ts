@@ -175,7 +175,10 @@ export type JournalRow = {
 };
 
 export type CameraSlot = { id: string; label: string; clips: Clip[]; status: string; source: string };
-export type Health = { status: string; service: string; models: Record<string, string>; ffmpeg: boolean; ffprobe?: boolean; cloud: string };
+export type Health = {
+  status: string; service: string; models: Record<string, string>; ffmpeg: boolean; ffprobe?: boolean; cloud: string;
+  runtime: { mode: string; features: Record<string, { mode: string; status: string; message: string; days?: number | null }> };
+};
 export type AuditItem = { id: string; action: string; subjectId: string; note: string; description?: string; actorId?: string | null; occurredAt: string; entryHash?: string };
 export type AuditIntegrity = { verified: boolean; entriesChecked: number; headHash?: string; entryId?: string; reason?: string; limitation?: string };
 export type EventItem = { id: string; kind: string; message: string; severity: string; occurredAt: string };

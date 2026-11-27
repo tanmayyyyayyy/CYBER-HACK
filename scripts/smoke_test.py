@@ -262,8 +262,16 @@ def run() -> None:
             assert client.get("/sec-api/health").status_code == 200
             pre_me = client.get("/sec-api/auth/me")
             assert pre_me.status_code == 200 and pre_me.json()["authenticated"] is False
-            seed_res = client.post("/sec-api/auth/demo-seed")
-            assert seed_res.status_code == 200
+            portal_store.init_db()
+            with portal_store.connect() as db:
+                db.execute(
+                    """INSERT INTO portal_users(id,employee_id,email,display_name,mobile,role,password_hash,assigned_atms_json,created_at)
+                       VALUES(?,?,?,?,?,?,?,?,?)""",
+                    ("guard-test", "EMP-TEST-1", "guard@test.invalid", "Test Guard", "0000000000", "guard",
+                     portal_store.hash_secret("test-passphrase-2026"), '["ATM-01"]', portal_store.now_iso()),
+                )
+                db.execute("UPDATE atm_assignments SET guard_user_id='guard-test' WHERE atm_id='ATM-01'")
+            assert client.post("/sec-api/auth/demo-seed").status_code == 404
             # Bridge authentication check
             assert client.post("/sec-api/bridge/event", json={
                 "camera_id": "CAM-01", "atm_id": "ATM-01", "stage": "observe",
@@ -283,17 +291,17 @@ def run() -> None:
             })
             assert esc_res.status_code == 200 and esc_res.json()["priority"] == 1 and esc_res.json()["siren"] is True
             alert_id = esc_res.json()["alertId"]
-            # Guard OTP login + RBAC + Aadhaar sandbox verification
-            otp_req = client.post("/sec-api/auth/otp/request", json={"identifier": "EMP-GRD-101"}).json()
-            guard_login = client.post("/sec-api/auth/otp/verify", json={"challenge_id": otp_req["challengeId"], "otp": otp_req["demoOtpHint"]})
+            # Password login + RBAC; no simulated OTP endpoint is exposed.
+            unknown_login = client.post("/sec-api/auth/login", json={"identifier": "missing", "password": "wrong-passphrase"})
+            known_login = client.post("/sec-api/auth/login", json={"identifier": "EMP-TEST-1", "password": "wrong-passphrase"})
+            assert unknown_login.status_code == known_login.status_code == 401
+            assert unknown_login.json() == known_login.json()
+            assert client.post("/sec-api/auth/otp/request", json={"identifier": "EMP-TEST-1"}).status_code == 404
+            guard_login = client.post("/sec-api/auth/login", json={"identifier": "EMP-TEST-1", "password": "test-passphrase-2026"})
             assert guard_login.status_code == 200
             p_csrf = guard_login.json()["csrfToken"]
             assert len(client.get("/sec-api/guards").json()) == 1  # Guard sees only own profile
             assert client.post("/sec-api/rules/rule-1-concealment", headers={"X-Portal-CSRF": p_csrf}, json={"enabled": False}).status_code in (403, 405)
-            ekyc_req = client.post("/sec-api/guards/guard-101/aadhaar-otp/request", headers={"X-Portal-CSRF": p_csrf}, json={"aadhaar_input": "999988884821"}).json()
-            assert ekyc_req["aadhaarMasked"] == "XXXX-XXXX-4821"
-            ekyc_ver = client.post("/sec-api/guards/guard-101/aadhaar-otp/verify", headers={"X-Portal-CSRF": p_csrf}, json={"challenge_id": ekyc_req["challengeId"], "otp": ekyc_req["demoOtpHint"]})
-            assert ekyc_ver.status_code == 200 and ekyc_ver.json()["aadhaarVerified"] is True
             assert client.post(f"/sec-api/alerts/{alert_id}/escalate", headers={"X-Portal-CSRF": p_csrf}).json()["priority"] == 2
             assert client.post(f"/sec-api/alerts/{alert_id}/acknowledge", headers={"X-Portal-CSRF": p_csrf}).json()["status"] == "acknowledged"
             assert client.post(f"/sec-api/alerts/{alert_id}/resolve", headers={"X-Portal-CSRF": p_csrf}).json()["status"] == "resolved"

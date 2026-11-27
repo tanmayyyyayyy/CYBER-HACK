@@ -26,7 +26,7 @@ def _escalation_loop() -> None:
 async def lifespan(_app: FastAPI):
     global _WORKER
     store.init_db()
-    portal_router.seed_demo_personnel()
+    store.remove_demo_accounts()
     _STOP.clear()
     _WORKER = threading.Thread(target=_escalation_loop, name="security-portal-sla", daemon=True)
     _WORKER.start()
@@ -53,6 +53,17 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
     allow_headers=["Content-Type", "X-Portal-CSRF", "X-Drishti-Service-Key"],
 )
+
+
+@app.middleware("http")
+async def protect_portal_responses(request, call_next):
+    response = await call_next(request)
+    if request.url.path.startswith("/sec-api/"):
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Referrer-Policy"] = "no-referrer"
+    return response
 
 app.include_router(portal_router.router)
 
