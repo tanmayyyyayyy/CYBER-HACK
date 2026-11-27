@@ -3,15 +3,18 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import re
 import secrets
 import uuid
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
 from security_portal import store
+from backend import store as evidence_store
 
 PORTAL_COOKIE = "drishti_portal_session"
 SESSION_HOURS = 8
@@ -733,6 +736,9 @@ def ingest_bridge_payload(payload: BridgeEventRequest) -> dict[str, Any]:
                 "note": f"Triggered on {atm_id} ({payload.camera_id})" + (f" following {prior_code}" if prior_code else ""),
             }
         ]
+        if payload.incident_kind == "stream.camera_tamper":
+            for label, recipient in (("Assigned guard", guard_id), ("ATM administrator", admin_id), ("Police liaison", govt_id)):
+                timeline.append({"at": stamp, "tier": label, "note": "Alert posted to the assigned portal account." if recipient else "No portal account is assigned for this ATM."})
         db.execute(
             """INSERT INTO escalation_alerts(
                 id,atm_id,camera_id,incident_kind,prior_rule_code,severity,summary,subject_code,
@@ -759,6 +765,38 @@ def bridge_ingest_event(payload: BridgeEventRequest, request: Request) -> dict[s
     return ingest_bridge_payload(payload)
 
 
+def _can_view_alert(user: dict, row: Any) -> bool:
+    role = user["role"]
+    if row["incident_kind"] == "stream.camera_tamper" and role != "super_admin":
+        fields = {"guard": ("assigned_guard_id",), "atm_admin": ("assigned_admin_id",),
+                  "govt_official": ("assigned_govt_id", "backup_govt_id")}
+        return any(user["id"] == row[field] for field in fields.get(role, ()))
+    return role != "guard" or row["assigned_guard_id"] == user["id"] or row["atm_id"] in user["assignedAtms"]
+
+
+@router.get("/alerts/{alert_id}/snapshot")
+def alert_snapshot(alert_id: str, request: Request) -> Response:
+    user = _require_auth(request)["user"]
+    with store.connect() as db:
+        alert = db.execute("SELECT * FROM escalation_alerts WHERE id=?", (alert_id,)).fetchone()
+    if not alert or not _can_view_alert(user, alert):
+        raise HTTPException(404, "Alert snapshot not found.")
+    match = re.fullmatch(r"/api/live-incidents/([0-9a-f]{32})/image", alert["snapshot_url"])
+    if not match:
+        raise HTTPException(404, "Alert snapshot not found.")
+    with evidence_store.connect() as db:
+        incident = db.execute("SELECT image_path FROM live_incidents WHERE id=?", (match[1],)).fetchone()
+    if not incident:
+        raise HTTPException(404, "Alert snapshot not found.")
+    path = Path(incident["image_path"]).resolve()
+    if not path.is_relative_to(evidence_store.LIVE_EVIDENCE.resolve()) or not path.is_file():
+        raise HTTPException(404, "Alert snapshot not found.")
+    contents = path.read_bytes()
+    if not hmac.compare_digest(hashlib.sha256(contents).hexdigest(), alert["snapshot_sha256"]):
+        raise HTTPException(409, "Alert snapshot fingerprint does not match.")
+    return Response(contents, media_type="image/jpeg", headers={"Cache-Control": "private, no-store"})
+
+
 @router.get("/alerts")
 def list_alerts_and_observations(request: Request) -> dict[str, Any]:
     sess = _require_auth(request)
@@ -771,9 +809,8 @@ def list_alerts_and_observations(request: Request) -> dict[str, Any]:
 
     visible_alerts = []
     for r in all_alerts:
-        if user["role"] == "guard":
-            if r["assigned_guard_id"] != user["id"] and r["atm_id"] not in user["assignedAtms"]:
-                continue
+        if not _can_view_alert(user, r):
+            continue
         visible_alerts.append(
             {
                 "id": r["id"],
@@ -784,7 +821,7 @@ def list_alerts_and_observations(request: Request) -> dict[str, Any]:
                 "severity": r["severity"],
                 "summary": r["summary"],
                 "subjectCode": r["subject_code"],
-                "snapshotUrl": r["snapshot_url"],
+                "snapshotUrl": f"/sec-api/alerts/{r['id']}/snapshot" if r["incident_kind"] == "stream.camera_tamper" and r["snapshot_url"] else r["snapshot_url"],
                 "snapshotSha256": r["snapshot_sha256"],
                 "currentPriority": int(r["current_priority"]),
                 "status": r["status"],
@@ -862,7 +899,7 @@ def acknowledge_alert(alert_id: str, request: Request) -> dict[str, Any]:
     stamp = _iso()
     with store.connect() as db:
         row = db.execute("SELECT * FROM escalation_alerts WHERE id=?", (alert_id,)).fetchone()
-        if not row:
+        if not row or (row["incident_kind"] == "stream.camera_tamper" and not _can_view_alert(user, row)):
             raise HTTPException(404, "Alert not found.")
         if row["status"] == "resolved":
             raise HTTPException(409, "Alert is already resolved.")
@@ -882,7 +919,7 @@ def escalate_alert_manual(alert_id: str, request: Request) -> dict[str, Any]:
     stamp = _iso()
     with store.connect() as db:
         row = db.execute("SELECT * FROM escalation_alerts WHERE id=?", (alert_id,)).fetchone()
-        if not row:
+        if not row or (row["incident_kind"] == "stream.camera_tamper" and not _can_view_alert(user, row)):
             raise HTTPException(404, "Alert not found.")
         if row["status"] == "resolved":
             raise HTTPException(409, "Resolved alerts cannot be escalated.")
@@ -909,7 +946,7 @@ def resolve_alert(alert_id: str, request: Request) -> dict[str, Any]:
     stamp = _iso()
     with store.connect() as db:
         row = db.execute("SELECT * FROM escalation_alerts WHERE id=?", (alert_id,)).fetchone()
-        if not row:
+        if not row or (row["incident_kind"] == "stream.camera_tamper" and not _can_view_alert(user, row)):
             raise HTTPException(404, "Alert not found.")
         tl = store.json_load(row["timeline_json"], [])
         tl.append({"at": stamp, "tier": "Resolved", "note": f"Incident closed by {user['displayName']} ({user['role']})"})

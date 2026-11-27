@@ -85,6 +85,17 @@ def init_db() -> None:
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS footage_observations (
+                id TEXT PRIMARY KEY,
+                analysis_id TEXT NOT NULL REFERENCES analyses(id) ON DELETE CASCADE,
+                frame_seconds REAL NOT NULL,
+                face_visibility TEXT NOT NULL,
+                note TEXT NOT NULL,
+                actor_id TEXT NOT NULL,
+                occurred_at TEXT NOT NULL,
+                incident_json TEXT NOT NULL DEFAULT '{}'
+            );
+            CREATE INDEX IF NOT EXISTS idx_footage_observations_analysis ON footage_observations(analysis_id, frame_seconds);
             CREATE TABLE IF NOT EXISTS candidates (
                 id TEXT PRIMARY KEY,
                 analysis_id TEXT NOT NULL REFERENCES analyses(id) ON DELETE CASCADE,

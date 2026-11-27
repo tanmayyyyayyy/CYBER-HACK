@@ -5,6 +5,7 @@ import csv
 import hashlib
 import hmac
 import io
+from importlib.util import find_spec
 import json
 import mimetypes
 import os
@@ -13,6 +14,7 @@ import shutil
 import socket
 import sqlite3
 import subprocess
+import tempfile
 import uuid
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
@@ -691,7 +693,9 @@ def security_compliance_report(request: Request) -> StreamingResponse:
                     "controls": ["Salted scrypt RBAC", "HttpOnly SameSite=Strict CSRF Sessions", "Hashed Auth Throttle IDs", "AES-256-GCM DB Snapshots", "PIN / PAN Card Exclusion"],
                 },
                 "openSourceSbom": {
-                    "agplFree": True,
+                    "agplFree": find_spec("ultralytics") is None,
+                    "optionalUltralyticsInstalled": find_spec("ultralytics") is not None,
+                    "optionalUltralyticsEnabled": os.environ.get("DRISHTI_ADVANCED_VISION") == "1",
                     "models": analysis.model_status(),
                 },
             },
@@ -1191,12 +1195,19 @@ def get_analysis(analysis_id: str) -> dict:
             raise HTTPException(404, "Analysis not found")
         clip = store.row_dict(db.execute("SELECT * FROM clips WHERE id=?", (row["clip_id"],)).fetchone())
         candidates = db.execute("SELECT * FROM candidates WHERE analysis_id=? ORDER BY score DESC", (analysis_id,)).fetchall()
+        observations = db.execute("SELECT * FROM footage_observations WHERE analysis_id=? ORDER BY frame_seconds, rowid", (analysis_id,)).fetchall()
+    try:
+        offset = analysis.transaction_offset(row)
+    except (ValueError, TypeError):
+        offset = None
     return {
         "id": row["id"],
         "clipId": row["clip_id"],
         "clipName": clip["filename"],
+        "cameraId": clip["camera_id"],
         "transactionTime": row["transaction_time"],
         "transactionRef": row["transaction_ref"],
+        "transactionOffsetSeconds": offset,
         "caseRef": row.get("case_ref", ""),
         "timeMode": row["time_mode"],
         "clipStartTime": row["clip_start_time"],
@@ -1206,7 +1217,44 @@ def get_analysis(analysis_id: str) -> dict:
         "createdAt": row["created_at"],
         "result": store.json_load(row["result_json"], {}),
         "candidates": [_public_candidate(dict(c)) for c in candidates],
+        "observations": [{"id": ob["id"], "time": ob["frame_seconds"], "visibility": ob["face_visibility"],
+                          "note": ob["note"], "actorId": ob["actor_id"], "recordedAt": ob["occurred_at"],
+                          "incident": store.json_load(ob["incident_json"], {}) or None} for ob in observations],
     }
+
+
+class FootageObservationRequest(BaseModel):
+    time: float = Field(ge=0, allow_inf_nan=False)
+    visibility: str = Field(pattern=r"^(visible|covered|unavailable)$")
+    note: str = Field(default="", max_length=500)
+    incidentId: str = Field(default="", pattern=r"^(|[0-9a-f]{32})$")
+
+
+@app.post("/api/analyses/{analysis_id}/observations", status_code=201)
+def record_footage_observation(analysis_id: str, payload: FootageObservationRequest, request: Request) -> dict:
+    actor = request.state.session["user"]["id"]
+    observation_id = uuid.uuid4().hex
+    stamp = now()
+    source_time = round(payload.time, 3)
+    with store.connect() as db:
+        db.execute("BEGIN IMMEDIATE")
+        row = db.execute("SELECT a.status, c.duration, c.camera_id FROM analyses a JOIN clips c ON c.id=a.clip_id WHERE a.id=?", (analysis_id,)).fetchone()
+        if row is None:
+            raise HTTPException(404, "Analysis not found.")
+        if row["status"] != "completed" or payload.time > row["duration"]:
+            raise HTTPException(422, "Select a timestamp within the recording of a completed analysis.")
+        incident = {}
+        if payload.incidentId:
+            linked = db.execute("SELECT id, camera_id, kind, occurred_at, sha256 FROM live_incidents WHERE id=?", (payload.incidentId,)).fetchone()
+            if linked is None or linked["camera_id"].removeprefix("CAM-") != row["camera_id"].removeprefix("ATM-"):
+                raise HTTPException(422, "The incident must exist on the same camera channel as the clip.")
+            incident = dict(linked)
+        db.execute("INSERT INTO footage_observations VALUES(?,?,?,?,?,?,?,?)",
+                   (observation_id, analysis_id, source_time, payload.visibility, payload.note.strip(), actor, stamp, json.dumps(incident)))
+        store.append_audit(db, "footage.observation_recorded", observation_id,
+                           f"Analysis {analysis_id}, clip time {source_time:.3f}s. Investigator marked face {payload.visibility}."
+                           + (f" Manually linked incident {payload.incidentId}." if incident else ""), stamp, actor_id=actor)
+    return {"id": observation_id}
 
 
 @app.get("/api/candidates/{candidate_id}/image")
@@ -2430,7 +2478,17 @@ def _build_evidence_manifest(analysis_id: str) -> dict:
             "transactionTime": record["transactionTime"],
             "clipStartTime": record["clipStartTime"],
             "transactionRef": record["transactionRef"],
+            "clipOffsetSeconds": record["transactionOffsetSeconds"],
             "windowSeconds": record["windowSeconds"],
+        },
+        "footageReview": {
+            "windowStart": record["result"].get("windowStart"),
+            "windowEnd": record["result"].get("windowEnd"),
+            "sampledFrames": record["result"].get("sampledFrames"),
+            "personFrames": record["result"].get("personFrames"),
+            "trackingEngine": record["result"].get("trackingEngine"),
+            "personWithoutFaceSamples": record["result"].get("personWithoutFaceSamples"),
+            "observations": record["observations"],
         },
         "auditHeadHash": audit_state.get("headHash", ""),
         "candidates": [
@@ -2717,7 +2775,7 @@ def evidence_bsa63_pdf(analysis_id: str, request: Request) -> StreamingResponse:
 
 
 @app.get("/api/evidence/{analysis_id}/bundle.zip")
-def evidence_bundle_zip(analysis_id: str, request: Request) -> StreamingResponse:
+def evidence_bundle_zip(analysis_id: str, request: Request, include_original: bool = False) -> StreamingResponse:
     record = get_analysis(analysis_id)
     if record["status"] != "completed":
         raise HTTPException(409, "Forensic bundle is available after analysis completes.")
@@ -2734,13 +2792,42 @@ def evidence_bundle_zip(analysis_id: str, request: Request) -> StreamingResponse
         cand_rows = db.execute("SELECT id, image_path, bbox_json, frame_seconds, clip_id, track_id FROM candidates WHERE analysis_id=? ORDER BY score DESC LIMIT 6", (analysis_id,)).fetchall()
     signed_audit = sign_manifest({"exportedAt": now(), "integrity": integrity, "entries": audit_rows})
 
-    zip_buf = io.BytesIO()
+    zip_buf = tempfile.SpooledTemporaryFile(max_size=16 * 1024 * 1024)
+    original_name = ""
     with zipfile.ZipFile(zip_buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        if include_original:
+            clip = _clip_or_404(record["clipId"])
+            original = Path(clip["source_path"] or clip["path"])
+            original_name = "source/original" + Path(clip["filename"]).suffix.lower()
+            digest = hashlib.sha256()
+            try:
+                with original.open("rb") as source, zf.open(original_name, "w", force_zip64=True) as target:
+                    while chunk := source.read(1024 * 1024):
+                        digest.update(chunk)
+                        target.write(chunk)
+            except OSError as exc:
+                raise HTTPException(409, "Could not read the original footage for export.") from exc
+            if digest.hexdigest() != signed["clip"]["sourceSha256"]:
+                raise HTTPException(409, "Original footage does not match its recorded fingerprint.")
         zf.writestr("evidence-sheet.pdf", pdf_bytes)
         zf.writestr("bsa-section-63-certificate.pdf", bsa_bytes)
         zf.writestr("evidence-manifest.json", json.dumps(signed, indent=2))
         zf.writestr("case-dossier.json", json.dumps(dossier, indent=2))
         zf.writestr("audit-trail.json", json.dumps(signed_audit, indent=2))
+        linked_incidents = {ob["incident"]["id"]: ob["incident"] for ob in signed["footageReview"]["observations"] if ob["incident"]}
+        missing_incidents = []
+        with store.connect() as db:
+            for incident_id, link in linked_incidents.items():
+                incident = db.execute("SELECT image_path FROM live_incidents WHERE id=?", (incident_id,)).fetchone()
+                path = _safe_live_evidence_path(incident["image_path"]) if incident else None
+                try:
+                    contents = path.read_bytes() if path else b""
+                except OSError:
+                    contents = b""
+                if contents and hashlib.sha256(contents).hexdigest() == link["sha256"]:
+                    zf.writestr(f"incidents/{incident_id}.jpg", contents)
+                else:
+                    missing_incidents.append(incident_id)
         for idx, cr in enumerate(cand_rows, start=1):
             p = Path(cr["image_path"])
             if p.is_file():
@@ -2774,15 +2861,22 @@ def evidence_bundle_zip(analysis_id: str, request: Request) -> StreamingResponse
             f"Manifest Payload SHA-256: {signed['seal']['payloadSha256']}\n"
             f"Manifest HMAC-SHA256 Seal: {signed['seal']['signature']}\n\n"
             "Verify manifest integrity anytime inside Drishti -> Security Center -> Manifest Verifier.\n"
+            + (f"Verify {original_name} against clip.sourceSha256 in evidence-manifest.json.\n" if original_name else "")
+            + ("Linked incident snapshots unavailable or changed: " + ", ".join(missing_incidents) + "\n" if missing_incidents else "")
         )
         zf.writestr("VERIFY-OFFLINE.txt", readme_txt)
 
     zip_buf.seek(0)
     with store.connect() as db:
-        store.append_audit(db, "evidence.bundle_exported", analysis_id, "Exported complete offline forensic case bundle ZIP (BSA Sec 63 + Manifest + Stills)", now())
+        store.append_audit(db, "evidence.bundle_exported", analysis_id, "Prepared offline case bundle with manifest and review observations" + (" and hash-verified original footage." if original_name else "."), now())
     safe_id = re.sub(r"[^a-zA-Z0-9-]", "", analysis_id)[:24]
+    def stream_bundle():
+        with zip_buf:
+            while chunk := zip_buf.read(1024 * 1024):
+                yield chunk
+
     return StreamingResponse(
-        zip_buf,
+        stream_bundle(),
         media_type="application/zip",
         headers={"Content-Disposition": f'attachment; filename="drishti-case-bundle-{quote(safe_id)}.zip"'},
     )

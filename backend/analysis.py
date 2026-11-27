@@ -10,7 +10,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from backend import store
+from backend import advanced_vision, store
 
 MODEL_DIR = store.ROOT / "models"
 PERSON_MODEL = MODEL_DIR / "person_detection_mediapipe_2023mar.onnx"
@@ -381,6 +381,10 @@ def run_analysis(analysis_id: str) -> None:
         # Baseline keypad/card-slot ROI luminance/edge tracker for tampering/skimming review cue
         baseline_keypad_edges: float | None = None
         tamper_cues = 0
+        person_frames = 0
+        person_without_face_samples = []
+        byte_tracker = None
+        tracking_engine = "OpenCV person detector + IoU"
 
         while sampled < MAX_SAMPLED_FRAMES:
             ok, frame = cap.read()
@@ -393,8 +397,24 @@ def run_analysis(analysis_id: str) -> None:
             sampled += 1
             cap.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
 
-            boxes = detect_person_boxes(frame)
-            tracks, previous, next_track = match_tracks(boxes, previous, next_track)
+            boxes = advanced_vision.person_boxes(frame)
+            if boxes is None:
+                if tracking_engine != "OpenCV person detector + IoU":
+                    tracking_engine = "OpenCV person detector + IoU"
+                    previous.clear()
+                    byte_tracker = None
+                boxes = detect_person_boxes(frame)
+                tracks, previous, next_track = match_tracks(boxes, previous, next_track)
+            else:
+                if byte_tracker is None:
+                    byte_tracker = advanced_vision.new_tracker()
+                if byte_tracker is None:
+                    tracking_engine = "YOLOv8n + IoU"
+                    tracks, previous, next_track = match_tracks([box for box in boxes if box[4] >= .34], previous, next_track)
+                else:
+                    tracking_engine = "YOLOv8n + ByteTrack"
+                    tracks = advanced_vision.track_people(byte_tracker, boxes, frame)
+                    previous = {track_id: box[:4] for track_id, box in tracks}
             height, width = frame.shape[:2]
 
             # Track terminal presence & shoulder-surfing proximity
@@ -423,6 +443,8 @@ def run_analysis(analysis_id: str) -> None:
                     elif abs(edges - baseline_keypad_edges) > 12.0:
                         tamper_cues += 1
 
+            if tracks:
+                person_frames += 1
             if not tracks:
                 tracks = [(0, (0, 0, width, height, 1.0))]
             found = []
@@ -480,6 +502,9 @@ def run_analysis(analysis_id: str) -> None:
                         latest_time_by_track[track_id] = seconds
                         track_first_time.setdefault(track_id, seconds)
 
+            if any(track_id != 0 for track_id, _ in tracks) and not found:
+                person_without_face_samples.append(round(seconds, 3))
+
             for candidate in found:
                 prior = next(
                     (c for c in candidates if c["track_id"] == candidate["track_id"] and candidate["time"] - c["time"] < 1.5),
@@ -533,6 +558,9 @@ def run_analysis(analysis_id: str) -> None:
             "windowStart": round(start, 3),
             "windowEnd": round(end, 3),
             "sampledFrames": sampled,
+            "personFrames": person_frames,
+            "personWithoutFaceSamples": person_without_face_samples,
+            "trackingEngine": tracking_engine,
             "peopleSeen": len(latest_time_by_track),
             "primaryTerminalTrack": primary_track,
             "candidateCount": len(candidates),

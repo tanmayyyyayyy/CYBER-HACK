@@ -11,7 +11,7 @@ import {
 } from 'lucide-react';
 import {
   api, Analysis, AuditIntegrity, AuditItem, AuthUser, CameraSlot, Candidate, CaseDossier, CaseJourney, Clip,
-  DatabaseBackup, EventItem, formatBytes, formatDuration, Health, JournalRow,
+  DatabaseBackup, EventItem, FaceVisibility, formatBytes, formatDuration, Health, JournalRow,
   LiveEvidenceResponse, LiveEvidenceSubject, LiveIncident, ReportsData, SecurityOverview, StreamDetection, StreamsResponse, WatchlistEntry,
 } from './api';
 
@@ -689,6 +689,7 @@ function SurveillanceWall({ state, events, watchlist, onRefresh, onOpenSlotModal
                   <strong>{stream.name} ({stream.zone})</strong>
                   <small>
                     {stream.sourceLabel}
+                    {stream.trackingEngine ? ` · ${stream.trackingEngine}` : ''}
                     {stream.status === 'reconnecting' && stream.lastError
                       ? ` · ${stream.lastError}`
                       : stream.lastAlert
@@ -1273,7 +1274,7 @@ function SecurityCenter({ onToast }: { onToast: (toast: Toast) => void }) {
     <section className="panel security-tool-panel">
       <SectionTitle
         title="Indian Law Enforcement &amp; Enterprise Compliance Matrix"
-        detail="BSA 2023 Sec. 63 admissibility, DPDP Act 2023 redaction, RBI zero-cloud boundary &amp; non-AGPL ONNX SBOM."
+        detail="Evidence export, bystander redaction, local security controls and model inventory."
         action={<a className="button button-outline button-compact" href="/api/security/compliance-report.json" download><Download size={14} /> Compliance JSON</a>}
       />
       <div className="compliance-pills">
@@ -1679,6 +1680,12 @@ function Review({ analysisId, analysisSummary, canAnchor, onOpenSearch, onToast,
   const [showPrivacyModal, setShowPrivacyModal] = useState(false);
   const videoRef = useRef<HTMLVideoElement>(null);
   const characteristicsRef = useRef<HTMLElement>(null);
+  const [observationTime, setObservationTime] = useState('');
+  const [visibility, setVisibility] = useState<FaceVisibility>('unavailable');
+  const [observationNote, setObservationNote] = useState('');
+  const [incidentId, setIncidentId] = useState('');
+  const [relatedIncidents, setRelatedIncidents] = useState<LiveIncident[]>([]);
+  const [savingObservation, setSavingObservation] = useState(false);
 
   const load = useCallback(async () => {
     if (!analysisId) return;
@@ -1692,6 +1699,10 @@ function Review({ analysisId, analysisSummary, canAnchor, onOpenSearch, onToast,
     setShowEnhanced(false);
     setBrightness(100);
     setContrast(100);
+    setObservationTime('');
+    setVisibility('unavailable');
+    setObservationNote('');
+    setIncidentId('');
     void load();
   }, [analysisId, load]);
 
@@ -1700,6 +1711,18 @@ function Review({ analysisId, analysisSummary, canAnchor, onOpenSearch, onToast,
     const timer = window.setInterval(() => void load(), 2200);
     return () => window.clearInterval(timer);
   }, [analysisId, record?.status, load]);
+
+  useEffect(() => {
+    let active = true;
+    setRelatedIncidents([]);
+    const channel = record?.cameraId?.replace(/^ATM-/, '');
+    if (channel && record?.status === 'completed') {
+      void api.liveIncidents().then((items) => {
+        if (active) setRelatedIncidents(items.filter((item) => item.cameraId.replace(/^CAM-/, '') === channel));
+      }).catch(() => {});
+    }
+    return () => { active = false; };
+  }, [analysisId, record?.cameraId, record?.status]);
 
   const selected = record?.candidates.find((candidate) => candidate.id === selectedId) || record?.candidates[0];
   useEffect(() => { if (selected) setNote(selected.note || ''); }, [selected?.id]);
@@ -1733,6 +1756,22 @@ function Review({ analysisId, analysisSummary, canAnchor, onOpenSearch, onToast,
     videoRef.current.scrollIntoView({ block: 'nearest' });
   };
 
+  const saveObservation = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!observationTime.trim()) return;
+    setSavingObservation(true);
+    try {
+      await api.recordFootageObservation(analysisId, { time: Number(observationTime), visibility, note: observationNote.trim(), incidentId: incidentId.trim() });
+      setObservationNote('');
+      setIncidentId('');
+      await load();
+      onRefresh();
+      onToast({ kind: 'success', message: 'Footage observation saved to the case and audit log.' });
+    } catch (error) {
+      onToast({ kind: 'error', message: error instanceof Error ? error.message : 'Could not save footage observation.' });
+    } finally { setSavingObservation(false); }
+  };
+
   const anchorEvidence = async () => {
     setAnchoring(true);
     try {
@@ -1760,6 +1799,8 @@ function Review({ analysisId, analysisSummary, canAnchor, onOpenSearch, onToast,
     undefined,
   );
   const assessmentTime = bestCandidate?.time ?? record?.result?.windowStart ?? 0;
+  const missingFaces = record?.result?.personWithoutFaceSamples;
+  const visibilityLabels: Record<FaceVisibility, string> = { visible: 'Face visible', covered: 'Face visibly covered', unavailable: 'Face unavailable for review' };
 
   return <>
     <div className="review-context-bar"><div className="context-icon"><FileVideo2 size={18} /></div><div><strong>{active?.clipName || 'Loading clip record…'}</strong><span>{active?.caseRef ? `${active.caseRef} · ` : ''}{active?.transactionRef || 'No transaction reference'} · {active?.timeMode === 'absolute' ? 'Bank timestamp' : 'Clip-relative time'} {active?.transactionTime}</span></div><div className="context-window"><Clock3 size={15} /> ±{active?.windowSeconds || 0}s window</div><StatusBadge status={record?.status || active?.status || 'running'} />{record?.status === 'completed' && <><a className="button button-outline button-compact" href={`/api/evidence/${record.id}/manifest.json`} download><FileCode2 size={15} /> Manifest</a><a className="button button-outline button-compact" href={`/api/evidence/${record.id}/bsa63.pdf`} download><BadgeCheck size={15} /> BSA Sec 63</a><a className="button button-outline button-compact evidence-download" href={`/api/evidence/${record.id}.pdf`} download><Download size={15} /> PDF</a><a className="button button-primary button-compact" href={`/api/evidence/${record.id}/bundle.zip`} download><HardDrive size={15} /> Case Bundle (.zip)</a></>}</div>
@@ -1777,6 +1818,22 @@ function Review({ analysisId, analysisSummary, canAnchor, onOpenSearch, onToast,
         ))}
       </div>
     )}
+    {record?.status === 'completed' && <section className="panel clip-player-panel footage-review-panel">
+      <SectionTitle title="Face visibility and case handoff" detail={missingFaces === undefined
+        ? 'This analysis predates frame-by-frame visibility sampling. You can still record an observation.'
+        : `${missingFaces.length} of ${record.result.personFrames ?? 0} sampled frames with a detected person had no face detection.`}
+        action={<a className="button button-outline button-compact" href={`/api/evidence/${record.id}/bundle.zip?include_original=true`} download><Download size={15} /> Case bundle with original footage</a>} />
+      {missingFaces && missingFaces.length > 0 && <p className="footage-assessment-summary">A missed detection has several possible causes. <button type="button" className="text-button" onClick={() => { inspectSourceAt(missingFaces[0]); setObservationTime(String(missingFaces[0])); }}>Inspect first frame at {formatDuration(missingFaces[0])}</button></p>}
+      <form className="footage-observation-form" onSubmit={(event) => void saveObservation(event)}>
+        <label>Clip time (seconds)<input type="number" min="0" step="0.001" required value={observationTime} onChange={(e) => setObservationTime(e.target.value)} /></label>
+        <button type="button" className="button button-outline button-compact" onClick={() => { if (videoRef.current?.readyState) { videoRef.current.pause(); setObservationTime(videoRef.current.currentTime.toFixed(3)); } }}>Use source player time</button>
+        <label>Investigator observation<select value={visibility} onChange={(e) => setVisibility(e.target.value as FaceVisibility)}>{Object.entries(visibilityLabels).map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select></label>
+        {relatedIncidents.length > 0 && <label>Related incident on this camera (optional)<select value={incidentId} onChange={(e) => setIncidentId(e.target.value)}><option value="">Choose only if you verified the link</option>{relatedIncidents.map((incident) => <option key={incident.id} value={incident.id}>{new Date(incident.occurredAt).toLocaleString('en-IN')} · {incident.kind}</option>)}</select></label>}
+        <label>Notes (optional)<input value={observationNote} maxLength={500} onChange={(e) => setObservationNote(e.target.value)} placeholder="What is visible at this time?" /></label>
+        <button className="button button-primary button-compact" type="submit" disabled={savingObservation}>{savingObservation ? 'Saving…' : 'Save observation'}</button>
+      </form>
+      {(record.observations ?? []).map((ob) => <p key={ob.id} className="footage-assessment-summary"><button type="button" className="text-button" onClick={() => inspectSourceAt(ob.time)}>{formatDuration(ob.time)}</button> · <strong>{visibilityLabels[ob.visibility]}</strong>{ob.note && ` · ${ob.note}`}{ob.incident && <> · <a href={`/api/live-incidents/${ob.incident.id}/image`}>Linked incident snapshot</a></>}</p>)}
+    </section>}
     <div className="review-grid">
       <section className="panel candidate-panel"><SectionTitle title="Face frame candidates" detail={record?.status === 'completed' ? `${record.candidates.length} frames · sorted by quality score (${record.result.embeddingModel || 'local'})` : 'Waiting for analysis results'} action={record?.status === 'completed' && record.candidates.length > 0 ? <span className="sorted-indicator"><SlidersHorizontal size={14} /> BEST FIRST</span> : undefined} />
         {record?.status === 'completed' && record.candidates.length ? <div className="candidate-grid">{record.candidates.map((candidate, index) => <button className={`candidate-card ${selected?.id === candidate.id ? 'candidate-selected' : ''}`} onClick={() => setSelectedId(candidate.id)} key={candidate.id}>
@@ -1826,7 +1883,7 @@ function Review({ analysisId, analysisSummary, canAnchor, onOpenSearch, onToast,
         {record?.status === 'completed' && (
           <section ref={characteristicsRef} tabIndex={-1} aria-label="Physical characteristics" className="panel clip-player-panel">
             <SectionTitle title="Physical characteristics" detail="Footage assessment for the analyzed time window" />
-            <p className="footage-assessment-summary">{record.result.sampledFrames ?? 0} frames sampled · {record.candidates.length} face candidates saved</p>
+            <p className="footage-assessment-summary">{record.result.sampledFrames ?? 0} frames sampled · {record.candidates.length} face candidates saved{record.result.trackingEngine ? ` · ${record.result.trackingEngine}` : ''}</p>
             <p className="footage-assessment-summary">{bestCandidate
               ? `Highest-ranked face crop at ${bestCandidate.timeLabel} · image quality ${Math.round(bestCandidate.score)}/100${bestCandidate.flags.length ? ` · ${bestCandidate.flags.join(', ')}` : ''}`
               : 'No face crop was found in this window. Open the source footage to inspect the scene.'}</p>
@@ -1844,9 +1901,9 @@ function Review({ analysisId, analysisSummary, canAnchor, onOpenSearch, onToast,
     {record?.status === 'completed' && <section className="panel timeline-panel"><SectionTitle title="Transaction timeline" detail="Candidate frames within the selected time window" />
       <div className="timeline-track"><div className="timeline-range"><span>{formatDuration(record.result.windowStart || 0)}</span><div className="timeline-line"><i /><i /><i /></div><span>{formatDuration(record.result.windowEnd || 0)}</span></div><div className="transaction-marker" style={{ left: `${(() => {
         const ws = record.result.windowStart || 0;
-        const we = Math.max(record.result.windowEnd || 1, ws + 1);
-        const mid = (ws + we) / 2;
-        return Math.min(92, Math.max(8, ((mid - ws) / (we - ws)) * 100));
+        const we = Math.max(record.result.windowEnd ?? ws, ws + 0.001);
+        const offset = record.transactionOffsetSeconds ?? ws;
+        return Math.min(100, Math.max(0, ((offset - ws) / (we - ws)) * 100));
       })()}%` }}><span>{record.transactionTime}</span><i /></div>{record.candidates.map((candidate, index) => <button key={candidate.id} className="timeline-candidate" style={{ left: `${Math.min(96, Math.max(2, ((candidate.time - (record.result.windowStart || 0)) / Math.max((record.result.windowEnd || 1) - (record.result.windowStart || 0), 1)) * 100))}%` }} title={`${candidate.timeLabel} · score ${Math.round(candidate.score)}`} onClick={() => setSelectedId(candidate.id)}><i style={{ height: `${22 + candidate.score * 0.55}px` }} /><span>{index === 0 ? candidate.timeLabel : ''}</span></button>)}</div>
       <div className="timeline-legend"><span><i className="legend-transaction" />Transaction time</span><span><i className="legend-candidate" />Detected face frame</span><span>{record.result.sampledFrames || 0} frames sampled</span></div>
     </section>}
