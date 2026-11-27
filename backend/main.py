@@ -686,7 +686,12 @@ def create_database_backup(payload: DatabaseBackupRequest, request: Request) -> 
             check = snapshot.execute("PRAGMA quick_check").fetchone()[0]
             if check != "ok":
                 raise RuntimeError("SQLite snapshot did not pass quick_check")
-            encrypted = encrypt_snapshot(snapshot.serialize(), payload.passphrase)
+            raw_snapshot = bytearray(snapshot.serialize())
+            if len(raw_snapshot) >= 20 and (raw_snapshot[18] == 2 or raw_snapshot[19] == 2):
+                # Normalize WAL format bytes (18, 19) to standard rollback v1 for self-contained snapshot portability
+                raw_snapshot[18] = 1
+                raw_snapshot[19] = 1
+            encrypted = encrypt_snapshot(bytes(raw_snapshot), payload.passphrase)
         finally:
             snapshot.close()
             source.close()

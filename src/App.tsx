@@ -703,7 +703,7 @@ function SurveillanceWall({ state, events, watchlist, onRefresh, onOpenSlotModal
               <div className="live-db-list">
                 {dbSubjects.map((sub) => (
                   <div className={`live-db-card ${sub.isRepeat ? 'live-db-card-repeat' : ''}`} key={sub.id}>
-                    <img src={`${sub.imageUrl}?t=${tick}`} alt={sub.subjectCode} />
+                    <img src={`${sub.imageUrl}?v=${sub.sightingCount}`} alt={sub.subjectCode} />
                     <div className="live-db-meta">
                       <div className="live-db-top">
                         <strong>{sub.subjectCode}</strong>
@@ -737,7 +737,7 @@ function SurveillanceWall({ state, events, watchlist, onRefresh, onOpenSlotModal
               <div className="face-capture-strip">
                 {faceStreams.map((fs) => (
                   <div className="face-capture-card" key={fs.id}>
-                    <img src={`${fs.latestFaceUrl}?t=${tick}`} alt={`Latest face from ${fs.id}`} />
+                    <img src={`${fs.latestFaceUrl}?v=${encodeURIComponent(fs.latestFaceAt || '')}`} alt={`Latest face from ${fs.id}`} />
                     <div className="face-capture-info">
                       <strong>{fs.id} · Q {Math.round(fs.latestFaceScore || 0)}/100</strong>
                       <span>{fs.latestFaceAt ? new Date(fs.latestFaceAt).toLocaleTimeString('en-IN') : 'Live'}</span>
@@ -832,19 +832,25 @@ function SurveillanceWall({ state, events, watchlist, onRefresh, onOpenSlotModal
         </aside>
       </div>
       {previewIncident && createPortal(
-        <div className="modal-backdrop" onClick={() => setPreviewIncident(null)}>
-          <div className="modal-card slot-modal" onClick={(e) => e.stopPropagation()}>
-            <div className="panel-head">
+        <div className="privacy-modal-backdrop" role="dialog" aria-modal="true" aria-label="Auto-captured incident snapshot" onClick={() => setPreviewIncident(null)}>
+          <div className="privacy-modal slot-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="section-title">
               <div>
-                <h3>{previewIncident.cameraId} · {previewIncident.kind.replace('stream.', '').toUpperCase()}</h3>
+                <h2>{previewIncident.cameraId} · {previewIncident.kind.replace('stream.', '').toUpperCase()}</h2>
                 <p>{previewIncident.summary}</p>
               </div>
               <button className="icon-button" aria-label="Close modal" onClick={() => setPreviewIncident(null)}><X size={18} /></button>
             </div>
             <img className="incident-modal-img" src={previewIncident.imageUrl} alt={previewIncident.summary} />
-            <div className="evidence-note" style={{ marginTop: 10 }}>
+            <div className="review-disclaimer" style={{ marginTop: 10 }}>
               <ShieldCheck size={16} />
-              <span>Captured {new Date(previewIncident.occurredAt).toLocaleString('en-IN')} · SHA-256: {previewIncident.sha256}</span>
+              <span>Captured {new Date(previewIncident.occurredAt).toLocaleString('en-IN')} · SHA-256: {previewIncident.sha256.slice(0, 18)}…</span>
+            </div>
+            <div className="form-row" style={{ marginTop: 10 }}>
+              <span className="local-chip"><LockKeyhole size={14} /> AUTO-SAVED DB EVIDENCE</span>
+              <a className="button button-primary button-compact" href={previewIncident.imageUrl} download={`incident-${previewIncident.cameraId}-${previewIncident.id.slice(0, 8)}.jpg`}>
+                <Download size={14} /> Download Snapshot
+              </a>
             </div>
           </div>
         </div>,

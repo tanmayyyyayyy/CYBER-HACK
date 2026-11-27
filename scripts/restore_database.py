@@ -53,6 +53,8 @@ def restore_backup(source: Path, passphrase: str, target: Path | None = None) ->
             preserved = previous_database_path(target)
             os.replace(target, preserved)
             os.chmod(preserved, 0o600)
+        for sidecar in (Path(f"{target}-wal"), Path(f"{target}-shm"), Path(f"{target}-journal")):
+            sidecar.unlink(missing_ok=True)
         os.replace(temp_name, target)
         temp_name = None
         os.chmod(target, 0o600)
