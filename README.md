@@ -167,8 +167,30 @@ CYBER-HACK/
 │   ├── restore_database.py  # Encrypted AES-256-GCM SQLite snapshot restore CLI
 │   └── run_ui_test_server.py# Local test server harness
 ├── demo_feeds/          # 4 compact local pilot feeds (cam_01_vestibule.mp4 .. cam_04_exit.mp4)
+├── PS04_demo_data/      # RPH26 PS04 Demo Dataset Builder, format samples, ATM master & consent forms
 └── docs/                # Pitch guide, architecture/integration notes, productization & UI test report
 ```
+
+---
+
+## PS04 Demo Dataset Builder (`PS04_demo_data/`)
+
+To test Drishti against realistic Rajasthan Police Hackathon 2026 (PS04) test cases — multi-codec DVR exports (`MP4`, `AVI MJPEG`, `MKV H.265`, `MOV`, `WMV`, `FLV`, `MPEG-2`, raw `.264`), clock offsets up to `+1h`, Dahua `.dav` (`DHAV`) error handling, and Electronic Journals (`_ej.txt` / bank CSVs):
+
+1. Copy raw ATM-style videos into [`PS04_demo_data/raw_videos/`](PS04_demo_data/raw_videos/PUT_YOUR_VIDEOS_HERE.txt).
+2. Generate the clip manifest:
+   ```bash
+   python3 PS04_demo_data/_tools/build_ps04.py init PS04_demo_data/
+   ```
+3. Fill in `person_id`, `role`, and second offsets in `PS04_demo_data/clip_manifest.csv` (see [`clip_manifest_TEMPLATE.csv`](PS04_demo_data/00_format_samples/clip_manifest_TEMPLATE.csv) and [`HOW_TO_USE_YOUR_VIDEOS.md`](PS04_demo_data/HOW_TO_USE_YOUR_VIDEOS.md)).
+4. Build the formatted clips, transaction logs, cases, and answer key:
+   ```bash
+   python3 PS04_demo_data/_tools/build_ps04.py build PS04_demo_data/
+   ```
+5. **Analyze in Drishti:**
+   - Upload clips from `PS04_demo_data/02_videos/<ATM_ID>/` (or `format_coverage/`) into **Case desk** / **Video library** — raw `.264` elementary streams are automatically normalized with accurate duration/FPS, and `02_videos/proprietary/UDR0019.export.dav` (`DHAV`) triggers vendor conversion instructions.
+   - Paste any generated `03_transactions/<ATM_ID>_ej.txt`, `<ATM_ID>_bank_statement.csv`, or standard CSV directly into **ATM Transaction Journal Matcher (`/api/journal/match`)** — Drishti parses `DD/MM/YYYY HH:MM:SS` EJ blocks, `DD-MM-YYYY` bank CSVs, and ISO timestamps natively.
+   - Cross-check extracted suspects via **Face search** (SFace 128-D) and **Sealed PDF / BSA Sec. 63 / Bundle `.zip`** exports against `99_answer_key/answer_key.csv`.
 
 ---
 

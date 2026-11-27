@@ -168,10 +168,50 @@ def _transcode_review_copy(source: Path, target: Path, ffmpeg: str) -> None:
         )
     except (subprocess.SubprocessError, OSError) as exc:
         target.unlink(missing_ok=True)
+        proprietary_msg = forensics.detect_proprietary_dvr(source)
+        if proprietary_msg:
+            raise HTTPException(422, proprietary_msg) from exc
         raise HTTPException(
             422,
             "Could not normalize this export locally. If it uses encrypted/proprietary DVR playback, export it as standard MP4/AVI from your DVR software (Hikvision iVMS-4200, Dahua SmartPSS, or CP Plus KVMS) and retry.",
         ) from exc
+
+
+def _prepare_clip_media(path: Path, normalized: Path, suffix: str) -> tuple[Path, dict, bool, str]:
+    """Probe uploaded clip and normalize non-browser/raw codecs into MP4 for reliable analysis and preview."""
+    proprietary_msg = forensics.detect_proprietary_dvr(path)
+    source_info = _inspect_video(path)
+    ffmpeg = shutil.which("ffmpeg")
+    if source_info is None:
+        if not ffmpeg:
+            raise HTTPException(422, proprietary_msg or "This file could not be decoded. Install FFmpeg and export it as MP4/H.264.")
+        _transcode_review_copy(path, normalized, ffmpeg)
+        playback_info = _inspect_video(normalized)
+        if playback_info is None:
+            raise HTTPException(422, proprietary_msg or "FFmpeg could not normalize this export. Check the DVR/NVR export settings.")
+        return normalized, playback_info, True, playback_info["codec"]
+
+    codec_name = source_info["codec"].lower()
+    suffix_name = suffix.lower()
+    browser_codec = (suffix_name == ".mp4" and codec_name in {"avc1", "h264", "x264"}) or (
+        suffix_name == ".webm" and codec_name in {"vp80", "vp90", "vp09", "av01"}
+    )
+    if not browser_codec and ffmpeg:
+        _transcode_review_copy(path, normalized, ffmpeg)
+        playback_info = _inspect_video(normalized)
+        if playback_info is None:
+            raise HTTPException(422, proprietary_msg or "The converted playback copy could not be decoded.")
+        # Raw elementary streams (.264/.h264) report invalid duration before remuxing; prefer normalized metrics.
+        merged_info = {
+            "width": playback_info["width"] or source_info["width"],
+            "height": playback_info["height"] or source_info["height"],
+            "fps": playback_info["fps"] or source_info["fps"],
+            "duration": playback_info["duration"] if playback_info["duration"] > 0 else source_info["duration"],
+            "codec": source_info["codec"] if source_info["codec"] != "unknown" else playback_info["codec"],
+        }
+        return normalized, merged_info, True, playback_info["codec"]
+
+    return path, source_info, browser_codec, source_info["codec"]
 
 
 def _clip_or_404(clip_id: str) -> dict:
@@ -249,37 +289,7 @@ def _ingest_local_file(source_file: Path, original_name: str, camera_id: str, co
         shutil.copy2(source_file, path)
     size = path.stat().st_size
     source_digest = _file_sha256(path)
-    source_info = _inspect_video(path)
-    if source_info is None:
-        ffmpeg = shutil.which("ffmpeg")
-        if not ffmpeg:
-            raise HTTPException(422, "This file could not be decoded. Install FFmpeg and export it as MP4/H.264.")
-        _transcode_review_copy(path, normalized, ffmpeg)
-        source_info = _inspect_video(normalized)
-        if source_info is None:
-            raise HTTPException(422, "FFmpeg could not normalize this export. Check the DVR/NVR export settings.")
-        playable_path = normalized
-        preview_ready = True
-        playback_codec = source_info["codec"]
-    else:
-        playable_path = path
-        codec_name = source_info["codec"].lower()
-        suffix_name = suffix.lower()
-        browser_codec = (suffix_name == ".mp4" and codec_name in {"avc1", "h264", "x264"}) or (
-            suffix_name == ".webm" and codec_name in {"vp80", "vp90", "vp09", "av01"}
-        )
-        ffmpeg = shutil.which("ffmpeg")
-        if not browser_codec and ffmpeg:
-            _transcode_review_copy(path, normalized, ffmpeg)
-            playable_path = normalized
-            playback_info = _inspect_video(playable_path)
-            if playback_info is None:
-                raise HTTPException(422, "The converted playback copy could not be decoded.")
-            playback_codec = playback_info["codec"]
-            preview_ready = True
-        else:
-            playback_codec = source_info["codec"]
-            preview_ready = browser_codec
+    playable_path, source_info, preview_ready, playback_codec = _prepare_clip_media(path, normalized, suffix)
 
     width, height = source_info["width"], source_info["height"]
     fps, duration, codec = source_info["fps"], source_info["duration"], source_info["codec"]
@@ -937,40 +947,10 @@ async def upload_clip(request: Request, filename: str, camera_id: str = "ATM-01"
                 output.write(chunk)
         if size == 0:
             raise HTTPException(400, "The uploaded clip is empty.")
-        # Reuse ingest pipeline without extra copy
+        # Reuse shared ingest probe/normalization pipeline without extra copy
         source_digest = _file_sha256(path)
-        source_info = _inspect_video(path)
         normalized = store.UPLOADS / f"{clip_id}-normalized.mp4"
-        if source_info is None:
-            ffmpeg = shutil.which("ffmpeg")
-            if not ffmpeg:
-                raise HTTPException(422, "This file could not be decoded. Install FFmpeg and export it as MP4/H.264.")
-            _transcode_review_copy(path, normalized, ffmpeg)
-            source_info = _inspect_video(normalized)
-            if source_info is None:
-                raise HTTPException(422, "FFmpeg could not normalize this export. Check the DVR/NVR export settings.")
-            playable_path = normalized
-            preview_ready = True
-            playback_codec = source_info["codec"]
-        else:
-            playable_path = path
-            codec_name = source_info["codec"].lower()
-            suffix_name = suffix.lower()
-            browser_codec = (suffix_name == ".mp4" and codec_name in {"avc1", "h264", "x264"}) or (
-                suffix_name == ".webm" and codec_name in {"vp80", "vp90", "vp09", "av01"}
-            )
-            ffmpeg = shutil.which("ffmpeg")
-            if not browser_codec and ffmpeg:
-                _transcode_review_copy(path, normalized, ffmpeg)
-                playable_path = normalized
-                playback_info = _inspect_video(playable_path)
-                if playback_info is None:
-                    raise HTTPException(422, "The converted playback copy could not be decoded.")
-                playback_codec = playback_info["codec"]
-                preview_ready = True
-            else:
-                playback_codec = source_info["codec"]
-                preview_ready = browser_codec
+        playable_path, source_info, preview_ready, playback_codec = _prepare_clip_media(path, normalized, suffix)
 
         width, height = source_info["width"], source_info["height"]
         fps, duration, codec = source_info["fps"], source_info["duration"], source_info["codec"]
@@ -1352,27 +1332,121 @@ def search_candidate(payload: SearchRequest) -> dict:
     }
 
 
+def _parse_journal_datetime(ts_raw: str) -> tuple[datetime | None, str]:
+    """Parse ISO, DD/MM/YYYY HH:MM:SS (EJ), or DD-MM-YYYY HH:MM:SS (Bank CSV) timestamps."""
+    text = ts_raw.strip()
+    if not text:
+        return None, text
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        return parsed, parsed.isoformat()
+    except ValueError:
+        pass
+    for fmt in ("%d/%m/%Y %H:%M:%S", "%d-%m-%Y %H:%M:%S", "%Y-%m-%d %H:%M:%S"):
+        try:
+            parsed = datetime.strptime(text, fmt)
+            return parsed, parsed.isoformat()
+        except ValueError:
+            continue
+    return None, text
+
+
+def _parse_ej_text_entries(raw_text: str, default_atm_id: str) -> list[dict[str, str]]:
+    """Parse PS04 / NCR-style plain-text Electronic Journal blocks into normalized journal dicts."""
+    entries: list[dict[str, str]] = []
+    atm_match = re.search(r"ATM(?:\s+ID)?[:\s]+([A-Z0-9_-]{4,16})", raw_text, re.IGNORECASE)
+    header_atm = atm_match.group(1) if atm_match else default_atm_id
+    blocks = re.split(r"[\-─]{8,}", raw_text)
+    for block in blocks:
+        if "OPCODE:" not in block and "STAN " not in block and "RRN " not in block:
+            continue
+        card_ts = re.search(r"(\d{2}/\d{2}/\d{4}\s+\d{2}:\d{2}:\d{2})\s+(?:CARD INSERTED|OPCODE:)", block)
+        any_ts = card_ts or re.search(r"(\d{2}/\d{2}/\d{4}\s+\d{2}:\d{2}:\d{2})", block)
+        if not any_ts:
+            continue
+        op_match = re.search(r"OPCODE:\s*([A-Z ]+?)(?:\s+AMOUNT:|\r?\n|$)", block)
+        amt_match = re.search(r"AMOUNT:\s*([\d,]+(?:\.\d+)?)", block)
+        stan_match = re.search(r"STAN\s+(\d+)", block)
+        rrn_match = re.search(r"RRN\s+(\d+)", block)
+        resp_match = re.search(r"RESP\s+(\d+)", block)
+        opcode = (op_match.group(1).strip() if op_match else "CASH WITHDRAWAL").replace(" ", "_")
+        resp = resp_match.group(1) if resp_match else "00"
+        amt = amt_match.group(1) if amt_match else ""
+        ref = (rrn_match.group(1) if rrn_match else (f"STAN-{stan_match.group(1)}" if stan_match else f"EJ-{len(entries)+1}"))
+        status_parts = [opcode]
+        if amt:
+            status_parts.append(f"INR {amt}")
+        if resp != "00":
+            status_parts.append(f"RESP {resp} FAIL")
+        entries.append({
+            "timestamp": any_ts.group(1),
+            "txn_ref": ref,
+            "atm_id": header_atm,
+            "status": " · ".join(status_parts),
+        })
+    return entries
+
+
+def _parse_journal_entries(raw_text: str, default_atm_id: str) -> list[dict[str, str]]:
+    """Detect and normalize CSV (standard or bank statement) or plain-text EJ logs."""
+    cleaned = raw_text.lstrip("\ufeff").strip()
+    if not cleaned:
+        return []
+    first_lines = "\n".join(cleaned.splitlines()[:6])
+    if ("OPCODE:" in cleaned or "TRANSACTION START" in cleaned) and "Txn Date" not in first_lines and "timestamp" not in first_lines.lower():
+        ej_rows = _parse_ej_text_entries(cleaned, default_atm_id)
+        if ej_rows:
+            return ej_rows
+
+    reader = csv.DictReader(io.StringIO(cleaned))
+    parsed_rows: list[dict[str, str]] = []
+    for idx, row in enumerate(reader, start=1):
+        norm = {str(k).strip().lower(): str(v or "").strip() for k, v in row.items() if k is not None}
+        ts_raw = norm.get("timestamp") or norm.get("time") or norm.get("txn_time") or norm.get("txn date") or ""
+        if not ts_raw:
+            continue
+        desc = norm.get("description") or ""
+        atm_from_desc = ""
+        if desc.upper().startswith("ATM WDL/"):
+            parts = desc.split("/")
+            if len(parts) >= 2:
+                atm_from_desc = parts[1].strip()
+        txn_ref = (
+            norm.get("txn_ref")
+            or norm.get("reference")
+            or norm.get("rrn")
+            or norm.get("ref no./cheque no.")
+            or f"ROW-{idx}"
+        )
+        debit = norm.get("debit") or ""
+        status = norm.get("status") or norm.get("type") or (f"ATM_WDL ₹{debit}" if debit and atm_from_desc else desc or "WITHDRAWAL")
+        atm_id = norm.get("atm_id") or atm_from_desc or default_atm_id
+        parsed_rows.append({
+            "timestamp": ts_raw,
+            "txn_ref": txn_ref,
+            "atm_id": atm_id,
+            "status": status,
+        })
+    return parsed_rows
+
+
 @app.post("/api/journal/match")
 def match_transaction_journal(payload: JournalMatchRequest) -> dict:
     clip = _clip_or_404(payload.clip_id)
-    try:
-        clip_start = datetime.fromisoformat(payload.clip_start_time.replace("Z", "+00:00"))
-    except ValueError as exc:
-        raise HTTPException(422, "Invalid clip_start_time ISO format.") from exc
+    clip_start, _ = _parse_journal_datetime(payload.clip_start_time)
+    if clip_start is None:
+        raise HTTPException(422, "Invalid clip_start_time timestamp format.")
 
-    reader = csv.DictReader(io.StringIO(payload.csv_text.strip()))
+    entries = _parse_journal_entries(payload.csv_text, clip["camera_id"])
     matched_rows = []
     queued_ids = []
-    for idx, row in enumerate(reader, start=1):
-        norm = {str(k).strip().lower(): str(v or "").strip() for k, v in row.items() if k is not None}
-        ts_raw = norm.get("timestamp") or norm.get("time") or norm.get("txn_time") or ""
-        txn_ref = norm.get("txn_ref") or norm.get("reference") or norm.get("rrn") or f"ROW-{idx}"
-        status = norm.get("status") or norm.get("type") or "WITHDRAWAL"
-        atm_id = norm.get("atm_id") or clip["camera_id"]
-        if not ts_raw:
-            continue
-        try:
-            txn_dt = datetime.fromisoformat(ts_raw.replace("Z", "+00:00"))
+    for idx, row in enumerate(entries, start=1):
+        ts_raw = row["timestamp"]
+        txn_ref = row["txn_ref"]
+        status = row["status"]
+        atm_id = row["atm_id"]
+        txn_dt, ts_iso = _parse_journal_datetime(ts_raw)
+        if txn_dt is not None:
             cmp_start = clip_start
             # Compare in wall-clock local time if either timestamp omits timezone offset
             if txn_dt.tzinfo is None and cmp_start.tzinfo is not None:
@@ -1380,7 +1454,7 @@ def match_transaction_journal(payload: JournalMatchRequest) -> dict:
             elif txn_dt.tzinfo is not None and cmp_start.tzinfo is None:
                 txn_dt = txn_dt.replace(tzinfo=None)
             offset = int((txn_dt - cmp_start).total_seconds())
-        except ValueError:
+        else:
             offset = -1
         in_clip = 0 <= offset < float(clip["duration"])
         disputed = any(word in status.lower() for word in ("dispute", "fraud", "skim", "suspect", "alert", "fail"))
@@ -1399,9 +1473,9 @@ def match_transaction_journal(payload: JournalMatchRequest) -> dict:
                 clip,
                 AnalysisRequest(
                     clip_id=clip["id"],
-                    transaction_time=ts_raw,
+                    transaction_time=ts_iso,
                     time_mode="absolute",
-                    clip_start_time=payload.clip_start_time,
+                    clip_start_time=clip_start.isoformat(),
                     transaction_ref=txn_ref,
                     case_ref=f"EJ-{txn_ref[:16]}",
                     window_seconds=payload.window_seconds,

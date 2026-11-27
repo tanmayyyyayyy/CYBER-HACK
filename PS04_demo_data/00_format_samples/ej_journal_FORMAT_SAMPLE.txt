@@ -1,0 +1,54 @@
+--------------------------------------------------------------------------------
+  ELECTRONIC JOURNAL (EJ) - FORMAT SAMPLE [synthetic, generic layout]
+  Replace with your bank's real EJ layout if available (NCR / Diebold /
+  Hitachi EJs differ). Card numbers are always masked.
+--------------------------------------------------------------------------------
+*** ATM ID: JPR0142   STATE BANK OF INDIA (DEMO)   MI ROAD JAIPUR ***
+--------------------------------------------------------------------------------
+14/10/2026 13:21:58   TRANSACTION START
+14/10/2026 13:22:00   CARD INSERTED
+14/10/2026 13:22:02   CARD NUMBER: 4591XXXXXXXX2231
+14/10/2026 13:22:14   PIN ENTERED
+14/10/2026 13:22:16   OPCODE: BALANCE ENQUIRY
+14/10/2026 13:22:19   STAN 004511  RRN 628713004511  RESP 00  AVL BAL 48,312.55
+14/10/2026 13:22:31   OPCODE: CASH WITHDRAWAL  AMOUNT: 10,000.00
+14/10/2026 13:22:36   STAN 004512  RRN 628713004512  RESP 00
+14/10/2026 13:22:41   NOTES PRESENTED  TYPE3(500) x 20
+14/10/2026 13:22:47   NOTES TAKEN
+14/10/2026 13:22:50   CARD TAKEN
+14/10/2026 13:22:51   TRANSACTION END
+--------------------------------------------------------------------------------
+14/10/2026 13:29:40   TRANSACTION START
+14/10/2026 13:29:42   CARD INSERTED
+14/10/2026 13:29:44   CARD NUMBER: 6521XXXXXXXX9854
+14/10/2026 13:29:55   PIN ENTERED
+14/10/2026 13:29:58   OPCODE: CASH WITHDRAWAL  AMOUNT: 2,000.00
+14/10/2026 13:30:01   STAN 004513  RRN 628713004513  RESP 55  (INCORRECT PIN)
+14/10/2026 13:30:06   CARD TAKEN
+14/10/2026 13:30:06   TRANSACTION END
+--------------------------------------------------------------------------------
+14/10/2026 13:44:12   TRANSACTION START
+14/10/2026 13:44:14   CARD INSERTED
+14/10/2026 13:44:14   CARD NUMBER: 4591XXXXXXXX2231
+14/10/2026 13:44:22   PIN ENTERED
+14/10/2026 13:44:24   OPCODE: CASH WITHDRAWAL  AMOUNT: 9,500.00
+14/10/2026 13:44:29   STAN 004514  RRN 628713004514  RESP 00
+14/10/2026 13:44:35   NOTES PRESENTED  TYPE3(500) x 19
+14/10/2026 13:44:41   NOTES TAKEN
+14/10/2026 13:44:44   CARD TAKEN
+14/10/2026 13:44:45   TRANSACTION END
+--------------------------------------------------------------------------------
+
+NOTES ON CLOCK ALIGNMENT (JPR0142):
+  Camera clock offset: +18 s  (camera clock = bank clock + 18 s)
+  To find the matching frame for STAN 004512 (insert time 13:22:36 bank):
+    Camera timestamp to look for = 13:22:36 + 00:00:18 = 13:22:54
+  Use the burned-in clock visible in the top-left corner of each video frame.
+
+RESP codes (ISO 8583):
+  00 = Approved
+  51 = Insufficient funds
+  55 = Incorrect PIN
+  57 = Transaction not permitted
+  91 = Issuer unavailable
+

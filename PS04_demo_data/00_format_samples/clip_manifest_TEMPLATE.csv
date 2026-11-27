@@ -1,0 +1,7 @@
+clip_id,source_file,atm_id,role,person_id,other_person_ids,txn_person_enter_sec,txn_card_insert_sec,txn_cash_taken_sec,txn_person_exit_sec,other_txn_card_insert_sec,occlusion,lighting,consent_form_id,notes,duration_sec,resolution,fps
+C01,raw_videos/IMG_101.mp4,JPR0142,primary,P01,,9,38,,46,,,none,day,CF-001,EXAMPLE ROW - victim's normal withdrawal,62,1280x720,30
+C02,raw_videos/IMG_102.mp4,JPR0317,primary,P01,,3,8,41,50,,cap,night,CF-001,EXAMPLE - same person different ATM,55,640x480,25
+C03,raw_videos/IMG_103.mp4,UDR0019,primary,P02,P03,6,12,47,55,70,mask,night,CF-002,EXAMPLE - hard; night IR + mask + bystander,78,352x288,8
+C04,raw_videos/IMG_104.mp4,AJM0055,search,P01,,,,,,,,sunglasses,day,CF-001,EXAMPLE - P01 appears at a third ATM (search clip),40,1920x1080,30
+C05,raw_videos/IMG_105.mp4,KOT0091,distractor,P04,,5,10,35,40,,none,backlit,CF-003,EXAMPLE - a different person entirely (distractor),48,640x360,25
+

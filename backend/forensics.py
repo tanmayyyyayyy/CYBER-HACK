@@ -29,6 +29,23 @@ DVR_EXPORT_GUIDANCE: list[dict[str, str]] = [
 ]
 
 
+def detect_proprietary_dvr(path: Path) -> str | None:
+    """Detect proprietary/unplayable DVR containers (e.g., Dahua DHAV) and return conversion guidance."""
+    try:
+        header = path.open("rb").read(16)
+    except OSError:
+        return None
+    suffix = path.suffix.lower()
+    if header.startswith(b"DHAV") or suffix == ".dav":
+        return (
+            "Unsupported proprietary Dahua .dav (DHAV) DVR export detected. "
+            "Convert with the DVR vendor's Smart Player / SmartPSS -> Export to MP4/AVI, "
+            "ask the bank to re-export via DVR 'Backup -> MP4', or if the underlying stream is raw H.264 run: "
+            "ffmpeg -f h264 -i input.264 -c copy output.mp4"
+        )
+    return None
+
+
 def probe_video_container(path: Path) -> dict[str, Any]:
     """Inspect container format, streams, encoder tag, and GOP anomalies via ffprobe."""
     ffprobe = shutil.which("ffprobe")
