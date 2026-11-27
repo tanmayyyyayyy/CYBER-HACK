@@ -1842,9 +1842,36 @@ def clear_live_evidence() -> dict:
     return {"cleared": int(count_row[0])}
 
 
+_LIVE_INCIDENTS_MAX = 500  # keep at most this many rows; prune oldest on every list call
+
+
 @app.get("/api/live-incidents")
 def list_live_incidents(limit: int = 30) -> list[dict]:
     with store.connect() as db:
+        # Prune oldest incidents beyond _LIVE_INCIDENTS_MAX to prevent unbounded growth
+        total = db.execute("SELECT COUNT(*) FROM live_incidents").fetchone()[0]
+        if total > _LIVE_INCIDENTS_MAX:
+            # Collect image_paths of rows to delete so we can clean up files
+            cutoff_rows = db.execute(
+                "SELECT id, image_path FROM live_incidents ORDER BY occurred_at ASC LIMIT ?",
+                (total - _LIVE_INCIDENTS_MAX,),
+            ).fetchall()
+            ids_to_delete = [r["id"] for r in cutoff_rows]
+            paths_to_delete = [r["image_path"] for r in cutoff_rows if r["image_path"]]
+            if ids_to_delete:
+                db.execute(
+                    f"DELETE FROM live_incidents WHERE id IN ({','.join('?'*len(ids_to_delete))})",
+                    ids_to_delete,
+                )
+                db.commit()
+            # Clean up orphaned image files outside the DB lock
+            for img_path in paths_to_delete:
+                try:
+                    p = Path(img_path)
+                    if p.exists():
+                        p.unlink(missing_ok=True)
+                except Exception:
+                    pass
         rows = db.execute(
             "SELECT * FROM live_incidents ORDER BY occurred_at DESC LIMIT ?",
             (max(1, min(limit, 100)),),
@@ -2572,7 +2599,13 @@ def evidence_bundle_zip(analysis_id: str, request: Request) -> StreamingResponse
             clip = _clip_or_404(top["clip_id"])
             bbox = store.json_load(top["bbox_json"], [])
             if len(bbox) == 4:
-                redacted = forensics.redact_bystanders_frame(clip["path"], float(top["frame_seconds"]), tuple(bbox), analysis.new_face_detector())
+                redacted = forensics.redact_bystanders_frame(
+                    Path(clip["path"]),
+                    float(top["frame_seconds"]),
+                    list(bbox) if isinstance(bbox, (list, tuple)) else None,
+                    analysis.new_face_detector(),
+                    clip["sha256"],
+                )
                 if redacted:
                     zf.writestr("candidates/01-bystander-redacted-dpdp.jpg", redacted)
         readme_txt = (

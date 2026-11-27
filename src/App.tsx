@@ -1427,7 +1427,7 @@ function CaseDesk({ clips, cameras, analyses, health, events, onAddOrChange, onD
                 <button type="button" className={mode === 'absolute' ? 'segment-active' : ''} onClick={() => { setMode('absolute'); setTime('2026-11-26T14:20:06'); }}>Bank time</button>
               </div>
             </div>
-            {mode === 'clip' ? <div className="time-entry"><Clock3 size={17} /><input id="transaction-time" name="transaction_time" type="text" inputMode="numeric" pattern="\d{2,3}:\d{2}:\d{2}" placeholder="HH:MM:SS" value={time} onChange={(event) => setTime(event.target.value)} required /><span>HH:MM:SS</span></div> : <div className="time-entry"><Clock3 size={17} /><input id="transaction-time" name="transaction_time" type="datetime-local" value={time} onChange={(event) => setTime(event.target.value)} required /></div>}
+            {mode === 'clip' ? <div className="time-entry"><Clock3 size={17} /><input id="transaction-time-text" name="transaction_time" type="text" inputMode="numeric" pattern="\d{2,3}:\d{2}:\d{2}" placeholder="HH:MM:SS" value={time} onChange={(event) => setTime(event.target.value)} required /><span>HH:MM:SS</span></div> : <div className="time-entry"><Clock3 size={17} /><input id="transaction-time" name="transaction_time" type="datetime-local" value={time} onChange={(event) => setTime(event.target.value)} required /></div>}
             {mode === 'absolute' && <label className="field-group" htmlFor="clip-start-time"><span className="field-label">CCTV clip start timestamp</span><input id="clip-start-time" name="clip_start_time" type="datetime-local" value={clipStart} onChange={(event) => setClipStart(event.target.value)} required /></label>}
 
             <div className="form-grid-two">
