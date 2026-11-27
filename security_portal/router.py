@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field
 
 from security_portal import store
 from backend import store as evidence_store
+from backend.integrations import capability_status, dispatch_alert
 
 PORTAL_COOKIE = "drishti_portal_session"
 SESSION_HOURS = 8
@@ -214,6 +215,7 @@ def portal_health() -> dict[str, Any]:
         "usersCount": users,
         "activeAlerts": active_alerts,
         "observations": observations,
+        "integrations": capability_status(),
     }
 
 
@@ -541,7 +543,15 @@ def ingest_bridge_payload(payload: BridgeEventRequest) -> dict[str, Any]:
             ),
         )
         db.execute("UPDATE rule_observations SET status='escalated' WHERE atm_id=? AND status='observing'", (atm_id,))
-    return {"action": "alert_triggered_p1", "alertId": alert_id, "priority": 1, "siren": True, "priorRule": prior_code}
+    dispatch = dispatch_alert({
+        "alertId": alert_id,
+        "atmId": atm_id,
+        "cameraId": payload.camera_id,
+        "incidentKind": payload.incident_kind,
+        "severity": payload.severity,
+        "occurredAt": stamp,
+    })
+    return {"action": "alert_triggered_p1", "alertId": alert_id, "priority": 1, "siren": True, "priorRule": prior_code, "dispatch": dispatch}
 
 
 @router.post("/bridge/event")

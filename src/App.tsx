@@ -251,12 +251,19 @@ function Workspace({ user, onSignOut }: { user: AuthUser; onSignOut: () => Promi
       </aside>
       {smallNavOpen && <button className="nav-scrim" aria-label="Close navigation" onClick={() => setSmallNavOpen(false)} />}
 
+      {health?.runtime.mode === 'mock' && (
+        <div className="mock-mode-banner" role="status">
+          <AlertTriangle size={17} />
+          <div><strong>MOCK / DEMONSTRATION MODE</strong><span>External identity, dispatch, and independent audit are unavailable unless configured. Storage encryption is not verified; legal and model validation are incomplete. Do not use real investigative footage.</span></div>
+        </div>
+      )}
+
       <main className="main-column">
         <div className="page-wrap">
           <div className="page-heading">
             <div><h1>{pageMeta.title}</h1><p>{pageMeta.subtitle}</p></div>
             <div className="page-actions">
-              <span className="local-chip"><LockKeyhole size={14} /> AIR-GAPPED LOCAL</span>
+              <span className="local-chip"><LockKeyhole size={14} /> LOCAL PROCESSING</span>
               <button className="button button-outline button-compact" onClick={() => void refresh(false)} disabled={refreshing}>
                 <RefreshCw size={15} className={refreshing ? 'spin' : ''} /> Refresh
               </button>

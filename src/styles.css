@@ -921,6 +921,11 @@ code, .hash-code, .mono-data, .topbar-clock strong, .candidate-card-meta, .simil
 }
 .journey-stage-BEHAVIOUR_ALERT { background: #faece9; color: #a1423a; }
 .journey-stage-TRANSACTION_LINK { background: #f7eedc; color: #8c5a1a; }
+.mock-mode-banner { display: flex; gap: 10px; align-items: flex-start; padding: 11px 20px; background: #fff5d8; border-bottom: 1px solid #e8d49a; color: #6f4a0d; font-size: 12px; }
+.mock-mode-banner > svg { flex: 0 0 auto; margin-top: 1px; }
+.mock-mode-banner strong, .mock-mode-banner span { display: block; }
+.mock-mode-banner strong { font-size: 11px; letter-spacing: .04em; }
+.mock-mode-banner span { margin-top: 2px; line-height: 1.45; }
 @media (max-width: 960px) {
   .intel-grid { grid-template-columns: 1fr; }
 }

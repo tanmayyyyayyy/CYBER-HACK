@@ -20,7 +20,7 @@ import uuid
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import quote
 
@@ -35,7 +35,7 @@ from reportlab.lib.pagesizes import A4
 from reportlab.lib.utils import ImageReader
 from reportlab.pdfgen import canvas
 
-from backend import analysis, auth, blockchain, forensics, store, streams
+from backend import analysis, auth, blockchain, forensics, integrations, store, streams
 from backend.security import encrypt_snapshot, sign_manifest, verify_manifest
 from security_portal import router as security_portal_router
 from security_portal import store as portal_store
@@ -656,7 +656,7 @@ def security_overview(request: Request) -> dict:
         ),
         "signingKey": {"present": store.SIGNING_KEY_PATH.is_file(), "permissions": _safe_mode(store.SIGNING_KEY_PATH)},
         "hostEncryption": {
-            "status": "verify",
+            "status": integrations.capability_status()["features"]["activeStorageEncryption"]["mode"],
             "message": "Enable FileVault, BitLocker, or LUKS on the host volume; this app does not manage the device key.",
         },
         "networkBoundary": {
@@ -678,6 +678,64 @@ def security_verify_manifest(payload: ManifestVerifyRequest, request: Request) -
             now(),
         )
     return result
+
+
+@app.post("/api/security/audit-checkpoint")
+def create_remote_audit_checkpoint(request: Request) -> dict:
+    admin = require_admin(request)
+    with store.connect() as db:
+        head = db.execute("SELECT entry_hash FROM audit_log ORDER BY rowid DESC LIMIT 1").fetchone()
+        count = db.execute("SELECT COUNT(*) FROM audit_log").fetchone()[0]
+    checkpoint = {
+        "schemaVersion": 1,
+        "createdAt": now(),
+        "host": socket.gethostname(),
+        "entryCount": count,
+        "headHash": head["entry_hash"] if head else "",
+    }
+    remote = integrations.send_audit_checkpoint(checkpoint)
+    with store.connect() as db:
+        store.append_audit(
+            db,
+            "security.audit_checkpoint",
+            admin["id"],
+            f"External checkpoint status={remote['status']}; entries={count}; head={checkpoint['headHash'][:16]}",
+            now(),
+        )
+    return {
+        "checkpoint": checkpoint,
+        "remote": remote,
+        "meaning": "A remote 2xx response means the configured endpoint accepted this signed chain-head checkpoint. It does not validate evidence content or legal admissibility.",
+    }
+
+
+@app.get("/api/security/retention")
+def retention_preview(request: Request) -> dict:
+    require_admin(request)
+    feature = integrations.capability_status()["features"]["retention"]
+    if feature["mode"] != "configured":
+        return {**feature, "eligibleClips": 0, "cutoff": None, "message": "Mock mode: no retention action is available until DRISHTI_RETENTION_DAYS is a positive integer."}
+    cutoff = datetime.now(timezone.utc) - timedelta(days=feature["days"])
+    cutoff_iso = cutoff.isoformat(timespec="seconds")
+    with store.connect() as db:
+        eligible = db.execute("SELECT COUNT(*) FROM clips WHERE uploaded_at < ?", (cutoff_iso,)).fetchone()[0]
+    return {**feature, "eligibleClips": eligible, "cutoff": cutoff_iso, "message": "Preview only. Retention runs only when an administrator explicitly requests it."}
+
+
+@app.post("/api/security/retention/run")
+def retention_run(request: Request) -> dict:
+    admin = require_admin(request)
+    feature = integrations.capability_status()["features"]["retention"]
+    if feature["mode"] != "configured":
+        return {**feature, "deletedClips": 0, "message": "Mock mode: no records were deleted. Configure a positive DRISHTI_RETENTION_DAYS value."}
+    cutoff_iso = (datetime.now(timezone.utc) - timedelta(days=feature["days"])).isoformat(timespec="seconds")
+    with store.connect() as db:
+        expired = [row[0] for row in db.execute("SELECT id FROM clips WHERE uploaded_at < ? ORDER BY uploaded_at", (cutoff_iso,)).fetchall()]
+    for clip_id in expired:
+        delete_clip(clip_id)
+    with store.connect() as db:
+        store.append_audit(db, "security.retention_run", admin["id"], f"Manually deleted {len(expired)} clips older than {cutoff_iso}", now(), actor_id=admin["id"])
+    return {"mode": "configured", "status": "completed", "deletedClips": len(expired), "cutoff": cutoff_iso, "message": "Clip-derived video, analysis, event, and candidate files were removed. This does not delete live identity or incident records."}
 
 
 @app.get("/api/security/compliance-report.json")
@@ -895,6 +953,7 @@ def health() -> dict:
         "ffmpeg": bool(shutil.which("ffmpeg")),
         "ffprobe": bool(shutil.which("ffprobe")),
         "cloud": "disabled",
+        "runtime": integrations.capability_status(),
     }
 
 
