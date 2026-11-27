@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import collections
+import concurrent.futures
 import hashlib
 import json
 import os
 import re
+import subprocess
 import threading
 import time
 import urllib.error
@@ -16,7 +19,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
-import base64
 
 import cv2
 import numpy as np
@@ -143,6 +145,87 @@ def _expand_http_webcam_candidates(url: str) -> list[str]:
         if fallback not in out:
             out.append(fallback)
     return out
+
+
+def _probe_single_ipcam_origin(base_url: str, timeout: float = 1.0) -> dict[str, str] | None:
+    for path in ("/shot.jpg", "/video", "/mjpegfeed", "/stream"):
+        test_url = f"{base_url.rstrip('/')}{path}"
+        req = urllib.request.Request(test_url, headers={"User-Agent": "Drishti-CCTV/1.0"})
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                ctype = (resp.headers.get("Content-Type") or "").lower()
+                server = resp.headers.get("Server") or ""
+                if "image/" in ctype or "multipart" in ctype or "ip webcam" in server.lower():
+                    stream_path = "/video" if path == "/shot.jpg" else path
+                    return {
+                        "baseUrl": base_url,
+                        "streamUrl": f"{base_url.rstrip('/')}{stream_path}",
+                        "probeUrl": test_url,
+                        "server": server or "IP Camera",
+                    }
+        except Exception:
+            continue
+    return None
+
+
+def discover_local_ipcams(ports: tuple[int, ...] = (8080, 4747, 8081)) -> list[dict[str, str]]:
+    """
+    Scan 1-hop local Wi-Fi / hotspot neighbors (both IPv4 ARP and IPv6 NDP link-local
+    like fe80::...%en0) to automatically find running Android IP Webcam / DroidCam feeds,
+    especially when mobile hotspot 464XLAT (192.0.0.4) blocks direct IPv4 routing.
+    """
+    hosts: list[str] = []
+    # Trigger a quick link-local multicast ping on common Wi-Fi interfaces so mobile phones appear in ndp -an
+    for iface in ("en0", "en1", "wlan0"):
+        try:
+            subprocess.run(
+                ["ping6", "-c", "1", "-t", "1", f"ff02::1%{iface}"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=0.9,
+                check=False,
+            )
+        except Exception:
+            pass
+
+    try:
+        ndp_out = subprocess.check_output(["ndp", "-an"], text=True, stderr=subprocess.DEVNULL, timeout=1.5)
+        for line in ndp_out.splitlines():
+            parts = line.split()
+            if not parts or "permanent" in line:
+                continue
+            addr = parts[0]
+            if addr.startswith("fe80::") and "%" in addr and addr not in hosts:
+                hosts.append(f"[{addr}]")
+            elif (addr.startswith("2409:") or addr.startswith("2405:") or addr.startswith("2001:")) and addr not in hosts:
+                hosts.append(f"[{addr}]")
+    except Exception:
+        pass
+
+    try:
+        arp_out = subprocess.check_output(["arp", "-an"], text=True, stderr=subprocess.DEVNULL, timeout=1.5)
+        for line in arp_out.splitlines():
+            m = re.search(r"\((\d+\.\d+\.\d+\.\d+)\)", line)
+            if not m:
+                continue
+            ip = m.group(1)
+            if "incomplete" in line or ip.endswith(".255") or ip.startswith(("224.", "239.", "127.")):
+                continue
+            if ip not in hosts:
+                hosts.append(ip)
+    except Exception:
+        pass
+
+    if not hosts:
+        return []
+
+    candidate_origins = [f"http://{h}:{p}" for h in hosts[:12] for p in ports]
+    found: list[dict[str, str]] = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(12, len(candidate_origins))) as pool:
+        for res in pool.map(lambda o: _probe_single_ipcam_origin(o, timeout=1.0), candidate_origins):
+            if res is not None:
+                found.append(res)
+    return found
 
 
 class _HttpCameraClient:
@@ -274,9 +357,11 @@ class _HttpCameraClient:
     def _worker(self) -> None:
         candidates = _expand_http_webcam_candidates(self.url)
         preferred: str = ""
+        tried_neighbor_fallback = False
         while not self._stop.is_set():
             order = [preferred, *[c for c in candidates if c != preferred]] if preferred else candidates
             any_success = False
+            saw_network_unreachable = False
             for candidate in order:
                 if self._stop.is_set():
                     break
@@ -304,8 +389,23 @@ class _HttpCameraClient:
                 except Exception as exc:
                     self._set_error(self._format_error(exc, candidate))
                     # Fast-fail unreachable host instead of waiting N * timeout on every endpoint
-                    if isinstance(exc, (TimeoutError, ConnectionRefusedError)) or "timed out" in str(exc).lower() or "refused" in str(exc).lower():
+                    msg_l = str(exc).lower()
+                    if isinstance(exc, (TimeoutError, ConnectionRefusedError)) or "timed out" in msg_l or "refused" in msg_l or "unreachable" in msg_l:
+                        saw_network_unreachable = "refused" not in msg_l
                         break
+            # When mobile hotspot IPv4 (e.g. 192.0.0.4) fails, auto-discover the phone over local IPv6 hotspot link!
+            if not any_success and not self._stop.is_set() and (saw_network_unreachable or urlsplit(self.url).hostname == "192.0.0.4"):
+                if not tried_neighbor_fallback or not preferred:
+                    tried_neighbor_fallback = True
+                    port = urlsplit(self.url).port or 8080
+                    self._set_error(f"IPv4 unreachable — scanning Wi-Fi/hotspot neighbors on :{port}...")
+                    discovered = discover_local_ipcams((port,))
+                    if discovered:
+                        new_base = discovered[0]["baseUrl"]
+                        candidates = _expand_http_webcam_candidates(new_base)
+                        preferred = discovered[0]["streamUrl"]
+                        self._set_error(f"Found phone via Wi-Fi link ({new_base}), connecting...")
+                        continue
             if not self._stop.is_set():
                 self._stop.wait(0.4 if any_success else 1.5)
 

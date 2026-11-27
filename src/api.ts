@@ -332,6 +332,7 @@ export const api = {
   auditIntegrity: () => request<AuditIntegrity>('/audit/integrity'),
   reports: () => request<ReportsData>('/reports'),
   streams: () => request<StreamsResponse>('/streams'),
+  discoverStreams: () => request<{ cameras: { baseUrl: string; streamUrl: string; probeUrl: string; server: string }[]; count: number }>('/streams/discover', { method: 'POST' }),
   toggleStreams: (running: boolean) => request<StreamsResponse>('/streams/toggle', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ running }) }),
   setStreamSource: (streamId: string, source: string) => request<StreamsResponse>(`/streams/${streamId}/source`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ source }) }),
   streamDetections: () => request<StreamDetection[]>('/streams/detections'),

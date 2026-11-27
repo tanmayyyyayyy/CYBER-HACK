@@ -1530,6 +1530,12 @@ def stream_latest_face(stream_id: str) -> StreamingResponse:
     return StreamingResponse(io.BytesIO(jpg), media_type="image/jpeg", headers={"Cache-Control": "no-store"})
 
 
+@app.post("/api/streams/discover")
+def discover_streams() -> dict:
+    found = streams.discover_local_ipcams()
+    return {"cameras": found, "count": len(found)}
+
+
 @app.post("/api/streams/{stream_id}/source")
 def set_stream_source(stream_id: str, payload: StreamSourceRequest) -> dict:
     try:

@@ -528,11 +528,34 @@ function SurveillanceWall({ state, events, watchlist, onRefresh, onOpenSlotModal
         ? `${streamId} feed cleared.`
         : sourceValue === 'default'
           ? `${streamId} reset to default pilot state.`
-          : `${streamId} connected to ${sourceValue}.`;
+          : `${streamId} connecting to ${sourceValue}…`;
       onToast({ kind: 'success', message: msg });
       onRefresh();
     } catch (err) {
       onToast({ kind: 'error', message: err instanceof Error ? err.message : 'Could not update camera feed.' });
+    } finally {
+      setCamSaving(false);
+    }
+  };
+
+  const autoDiscoverPhone = async () => {
+    setCamSaving(true);
+    try {
+      const res = await api.discoverStreams();
+      if (!res.cameras.length) {
+        onToast({ kind: 'error', message: 'No active IP Webcam found on Wi-Fi/hotspot (:8080/:4747). Start server in the app first.' });
+        return;
+      }
+      const best = res.cameras[0];
+      setIpUrl(best.streamUrl);
+      await api.setStreamSource(camTarget, best.streamUrl);
+      if (!state?.running) {
+        await api.toggleStreams(true);
+      }
+      onToast({ kind: 'success', message: `Found ${best.server} on ${best.baseUrl} -> streaming on ${camTarget}!` });
+      onRefresh();
+    } catch (err) {
+      onToast({ kind: 'error', message: err instanceof Error ? err.message : 'Auto-scan failed.' });
     } finally {
       setCamSaving(false);
     }
@@ -616,6 +639,9 @@ function SurveillanceWall({ state, events, watchlist, onRefresh, onOpenSlotModal
           />
           <button type="submit" className="button button-primary button-compact" disabled={camSaving || !ipUrl.trim()}>
             {camSaving ? <LoaderCircle size={14} className="spin" /> : <Radio size={14} />} Connect Feed
+          </button>
+          <button type="button" className="button button-outline button-compact" disabled={camSaving} onClick={() => void autoDiscoverPhone()}>
+            {camSaving ? <LoaderCircle size={14} className="spin" /> : <Search size={14} />} Auto-Find Phone
           </button>
           <button type="button" className="button button-outline button-compact" disabled={camSaving} onClick={() => { setIpUrl(''); void applyCameraSource(camTarget, 'default'); }}>
             <RotateCcw size={14} /> Reset Slot
