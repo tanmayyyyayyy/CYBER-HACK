@@ -29,5 +29,8 @@
     "@foundry-rs/anvil-linux-amd64": "1.7.1",
     "@foundry-rs/anvil-linux-arm64": "1.7.1",
     "@foundry-rs/anvil-win32-amd64": "1.7.1"
+  },
+  "allowScripts": {
+    "esbuild@0.25.12": true
   }
 }
