@@ -100,6 +100,8 @@ export type SurveillanceStream = {
   sourceAdapter: string;
   sourceLabel: string;
   customSource?: string;
+  resolvedSource?: string;
+  lastError?: string;
   isLiveCamera?: boolean;
   sourceAvailable: boolean;
   personCount: number;

@@ -381,7 +381,7 @@ function SlotSourceModal({ target, onClose, onChooseUpload, onConnectIpCam }: {
             </button>
             <button type="button" className="slot-modal-option" onClick={() => setTab('ipcam')}>
               <strong><Radio size={17} /> Connect IP Webcam / USB Cam</strong>
-              <span>Stream live from Android IP Webcam (`http://...:8080/video`), RTSP, or local camera `0`.</span>
+              <span>Paste Android IP Webcam (`http://...:8080` or `/video`), DroidCam, RTSP, or camera `0`.</span>
             </button>
           </div>
         ) : (
@@ -620,7 +620,7 @@ function SurveillanceWall({ state, events, watchlist, onRefresh, onOpenSlotModal
           <button type="button" className="button button-outline button-compact" disabled={camSaving} onClick={() => { setIpUrl(''); void applyCameraSource(camTarget, 'default'); }}>
             <RotateCcw size={14} /> Reset Slot
           </button>
-          <span className="ipcam-hint">Android IP Webcam app: use <code>http://&lt;phone-ip&gt;:8080/video</code></span>
+          <span className="ipcam-hint">IP Webcam / DroidCam: paste <code>http://&lt;phone-ip&gt;:8080</code> or <code>192.168.x.x:8080</code> (auto-finds <code>/video</code> &amp; <code>/shot.jpg</code>)</span>
         </form>
       </div>
 
@@ -661,7 +661,14 @@ function SurveillanceWall({ state, events, watchlist, onRefresh, onOpenSlotModal
               <div className="stream-footer">
                 <div className="stream-footer-meta">
                   <strong>{stream.name} ({stream.zone})</strong>
-                  <small>{stream.sourceLabel}{stream.lastAlert ? ` · ${stream.lastAlert}` : ''}</small>
+                  <small>
+                    {stream.sourceLabel}
+                    {stream.status === 'reconnecting' && stream.lastError
+                      ? ` · ${stream.lastError}`
+                      : stream.lastAlert
+                        ? ` · ${stream.lastAlert}`
+                        : ''}
+                  </small>
                 </div>
                 <div className="camera-actions-inline">
                   <button

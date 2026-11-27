@@ -14,7 +14,9 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Generator
+from typing import Any
+from urllib.parse import urlsplit, urlunsplit
+import base64
 
 import cv2
 import numpy as np
@@ -97,6 +99,215 @@ STREAM_CATALOG: list[dict[str, str]] = [
 ]
 
 _ALLOWED_STREAM_URL = re.compile(r"^(https?|rtsp)://[^\s]+$", re.IGNORECASE)
+_BARE_HOST_OR_IP = re.compile(r"^(\[[0-9a-fA-F:]+\]|[a-zA-Z0-9.-]+)(:\d{2,5})(/[^\s]*)?$")
+_VIDEO_FILE_EXTS = (".mp4", ".avi", ".mov", ".mkv", ".webm", ".flv", ".wmv", ".ts", ".m4v", ".dav")
+
+
+def _normalize_stream_source(raw: str) -> str:
+    cleaned = raw.strip()
+    if not cleaned:
+        return ""
+    if cleaned.lower() in ("default", "clear"):
+        return cleaned.lower()
+    if cleaned.isdigit() and 0 <= int(cleaned) <= 4:
+        return cleaned
+    if _ALLOWED_STREAM_URL.match(cleaned):
+        return cleaned
+    # Allow pasting IP:port directly from Android IP Webcam / DroidCam (e.g. 192.0.0.4:8080 or 192.168.1.50:8080/video)
+    if _BARE_HOST_OR_IP.match(cleaned):
+        return f"http://{cleaned}"
+    raise ValueError(
+        "Enter a valid IP Webcam URL (e.g. http://192.168.1.50:8080 or /video, 192.0.0.4:8080, rtsp://...), camera index (0-4), 'default', or 'clear'."
+    )
+
+
+def _is_static_http_video(url: str) -> bool:
+    path = urlsplit(url).path.lower()
+    return any(path.endswith(ext) for ext in _VIDEO_FILE_EXTS)
+
+
+def _expand_http_webcam_candidates(url: str) -> list[str]:
+    """
+    Android IP Webcam shows http://<ip>:8080 on screen, where `/` serves an HTML page
+    and the actual feeds live on `/video`, `/videofeed`, or `/shot.jpg`.
+    DroidCam uses `/mjpegfeed`; ESP32-CAM uses `/stream`.
+    """
+    parts = urlsplit(url)
+    path = (parts.path or "").rstrip("/")
+    base = lambda p: urlunsplit((parts.scheme, parts.netloc, p, parts.query, ""))
+    defaults = [base("/video"), base("/videofeed"), base("/shot.jpg"), base("/mjpegfeed"), base("/stream")]
+    if path in ("", "/index.html", "/greet.html", "/browser.html"):
+        return [*defaults, url]
+    out = [url]
+    for fallback in (base("/shot.jpg"), base("/video"), base("/videofeed")):
+        if fallback not in out:
+            out.append(fallback)
+    return out
+
+
+class _HttpCameraClient:
+    """
+    Non-blocking HTTP/HTTPS IP Webcam reader (MJPEG multipart + JPEG snapshot polling).
+    Avoids OpenCV/FFmpeg's 30s synchronous blocking inside the 4-stream main loop and
+    automatically discovers `/video`, `/videofeed`, `/shot.jpg`, `/mjpegfeed`, `/stream`.
+    """
+
+    def __init__(self, url: str) -> None:
+        self.url = url
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._frame: np.ndarray | None = None
+        self._frame_ts: float = 0.0
+        self._connected_url: str = ""
+        self._last_error: str = "Probing IP Webcam endpoints (/video, /shot.jpg)..."
+        self._thread = threading.Thread(target=self._worker, name="drishti-ipcam", daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+
+    def read_latest(self, max_age: float = 4.5) -> tuple[np.ndarray | None, str, str]:
+        with self._lock:
+            fresh = self._frame is not None and (time.monotonic() - self._frame_ts) <= max_age
+            frame = self._frame.copy() if fresh and self._frame is not None else None
+            return frame, self._connected_url, self._last_error
+
+    @staticmethod
+    def _build_request(candidate: str) -> urllib.request.Request:
+        parts = urlsplit(candidate)
+        headers = {"User-Agent": "Drishti-CCTV/1.0", "Accept": "image/jpeg,multipart/x-mixed-replace,*/*"}
+        clean_url = candidate
+        if parts.username is not None:
+            pw = parts.password or ""
+            token = base64.b64encode(f"{parts.username}:{pw}".encode("utf-8")).decode("ascii")
+            headers["Authorization"] = f"Basic {token}"
+            host_port = parts.hostname or ""
+            if ":" in host_port and not host_port.startswith("["):
+                host_port = f"[{host_port}]"
+            if parts.port:
+                host_port = f"{host_port}:{parts.port}"
+            clean_url = urlunsplit((parts.scheme, host_port, parts.path, parts.query, ""))
+        return urllib.request.Request(clean_url, headers=headers)
+
+    @staticmethod
+    def _format_error(exc: Exception, url: str) -> str:
+        host = urlsplit(url).netloc or url
+        if isinstance(exc, urllib.error.HTTPError):
+            if exc.code == 401:
+                return f"HTTP 401 auth required on {host} — disable login or use http://user:pass@{host}"
+            return f"HTTP {exc.code} from {host}"
+        msg = str(getattr(exc, "reason", exc))
+        low = msg.lower()
+        if "timed out" in low or isinstance(exc, TimeoutError):
+            if host.startswith("192.0.0."):
+                return f"Timed out reaching {host} (Jio/carrier 192.0.0.x hotspot blocks IPv4; use Wi-Fi router or IPv6)"
+            return f"Timed out reaching {host} — check same Wi-Fi & IP Webcam 'Start server'"
+        if "refused" in low:
+            return f"Connection refused by {host} — tap 'Start server' in IP Webcam app"
+        if "no route" in low or "unreachable" in low:
+            return f"Network unreachable to {host} — connect Mac & phone to same Wi-Fi"
+        return f"{host}: {msg[:72]}"
+
+    def _set_frame(self, frame: np.ndarray, endpoint: str) -> None:
+        with self._lock:
+            self._frame = frame
+            self._frame_ts = time.monotonic()
+            self._connected_url = endpoint
+            self._last_error = ""
+
+    def _set_error(self, msg: str) -> None:
+        with self._lock:
+            self._last_error = msg
+
+    def _stream_mjpeg(self, resp: Any, candidate: str) -> bool:
+        buf = bytearray()
+        got_any = False
+        while not self._stop.is_set():
+            chunk = resp.read(16384)
+            if not chunk:
+                break
+            buf.extend(chunk)
+            if len(buf) > 4_194_304:
+                del buf[:-1_048_576]
+            while True:
+                start = buf.find(b"\xff\xd8")
+                if start == -1:
+                    if len(buf) > 2:
+                        del buf[:-2]
+                    break
+                end = buf.find(b"\xff\xd9", start + 2)
+                if end == -1:
+                    if start > 0:
+                        del buf[:start]
+                    break
+                jpg_bytes = bytes(buf[start : end + 2])
+                del buf[: end + 2]
+                arr = np.frombuffer(jpg_bytes, dtype=np.uint8)
+                frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+                if frame is not None and frame.size > 0:
+                    self._set_frame(frame, candidate)
+                    got_any = True
+        return got_any
+
+    def _poll_snapshot(self, candidate: str) -> bool:
+        got_any = False
+        while not self._stop.is_set():
+            try:
+                with urllib.request.urlopen(self._build_request(candidate), timeout=2.2) as resp:
+                    ctype = (resp.headers.get("Content-Type") or "").lower()
+                    if "html" in ctype:
+                        self._set_error(f"{candidate} returned HTML page instead of video")
+                        return False
+                    raw = resp.read(4_194_304)
+                arr = np.frombuffer(raw, dtype=np.uint8)
+                frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+                if frame is None or frame.size == 0:
+                    return got_any
+                self._set_frame(frame, candidate)
+                got_any = True
+            except Exception as exc:
+                self._set_error(self._format_error(exc, candidate))
+                return got_any
+            self._stop.wait(0.09)
+        return got_any
+
+    def _worker(self) -> None:
+        candidates = _expand_http_webcam_candidates(self.url)
+        preferred: str = ""
+        while not self._stop.is_set():
+            order = [preferred, *[c for c in candidates if c != preferred]] if preferred else candidates
+            any_success = False
+            for candidate in order:
+                if self._stop.is_set():
+                    break
+                try:
+                    with urllib.request.urlopen(self._build_request(candidate), timeout=2.2) as resp:
+                        ctype = (resp.headers.get("Content-Type") or "").lower()
+                        if "html" in ctype or "text/" in ctype:
+                            self._set_error(f"{urlsplit(candidate).path or '/'} is webpage, trying /video & /shot.jpg...")
+                            continue
+                        if "multipart" in ctype or candidate.lower().endswith(("/video", "/videofeed", "/mjpegfeed", "/stream")):
+                            preferred = candidate
+                            any_success = self._stream_mjpeg(resp, candidate)
+                            if any_success:
+                                break
+                            continue
+                        raw = resp.read(4_194_304)
+                    arr = np.frombuffer(raw, dtype=np.uint8)
+                    frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+                    if frame is not None and frame.size > 0:
+                        self._set_frame(frame, candidate)
+                        preferred = candidate
+                        any_success = True
+                        self._poll_snapshot(candidate)
+                        break
+                except Exception as exc:
+                    self._set_error(self._format_error(exc, candidate))
+                    # Fast-fail unreachable host instead of waiting N * timeout on every endpoint
+                    if isinstance(exc, (TimeoutError, ConnectionRefusedError)) or "timed out" in str(exc).lower() or "refused" in str(exc).lower():
+                        break
+            if not self._stop.is_set():
+                self._stop.wait(0.4 if any_success else 1.5)
 
 
 @dataclass
@@ -123,6 +334,8 @@ class StreamState:
     cleared: bool = False
     source_path: str = ""
     source_label: str = "Slot available"
+    resolved_source: str = ""
+    last_connect_error: str = ""
     previous_boxes: dict[int, tuple[int, int, int, int]] = field(default_factory=dict)
     next_track_id: int = 1
     track_start_ts: dict[int, float] = field(default_factory=dict)
@@ -161,6 +374,7 @@ class LocalSurveillanceManager:
         self._running = False
         self._thread: threading.Thread | None = None
         self._face_detector = None
+        self._http_clients: dict[str, _HttpCameraClient] = {}
         self._streams: dict[str, StreamState] = {
             item["id"]: StreamState(meta=dict(item)) for item in STREAM_CATALOG
         }
@@ -487,79 +701,88 @@ class LocalSurveillanceManager:
                 return None
         return self._face_detector
 
+    @staticmethod
+    def _reset_live_state(state: StreamState) -> None:
+        state.person_count = 0
+        state.face_count = 0
+        state.active_tracks = 0
+        state.fps = 0.0
+        state.alert_state = "clear"
+        state.last_alert = ""
+        state.watchlist_hit = ""
+        state.repeat_hit = ""
+        state.repeat_hit_ts = 0.0
+        state.last_evidence_ts = 0.0
+        state.baseline_keypad_edges = None
+        state.tamper_streak = 0
+        state.prev_gray = None
+        state.shake_streak = 0
+        state.rule1_active_until = 0.0
+        state.rule1_code = ""
+        state.rule1_note = ""
+        state.security_stage = "clear"
+
+    def _stop_http_client(self, stream_id: str) -> None:
+        client = self._http_clients.pop(stream_id, None)
+        if client is not None:
+            client.stop()
+
     def set_custom_source(self, stream_id: str, source: str) -> dict[str, Any]:
         state = self._streams.get(stream_id)
         if not state:
             raise KeyError(stream_id)
-        cleaned = source.strip()
-        if cleaned.lower() == "clear":
+        normalized = _normalize_stream_source(source)
+        self._stop_http_client(stream_id)
+
+        if normalized == "clear":
             with self._lock:
                 state.custom_source = ""
                 state.cleared = True
+                state.resolved_source = ""
+                state.last_connect_error = ""
                 state.ring_buffer.clear()
                 state.latest_jpeg = b""
                 state.latest_face_jpeg = b""
-                state.person_count = 0
-                state.face_count = 0
-                state.alert_state = "clear"
-                state.last_alert = ""
-                state.watchlist_hit = ""
-                state.repeat_hit = ""
-                state.repeat_hit_ts = 0.0
-                state.last_evidence_ts = 0.0
-                state.baseline_keypad_edges = None
-                state.tamper_streak = 0
-                state.prev_gray = None
-                state.shake_streak = 0
-                state.rule1_active_until = 0.0
-                state.rule1_note = ""
-                state.security_stage = "clear"
                 state.previous_boxes.clear()
                 state.track_start_ts.clear()
+                self._reset_live_state(state)
             return self.status()
 
-        if not cleaned or cleaned.lower() == "default":
+        if not normalized or normalized == "default":
             with self._lock:
                 state.custom_source = ""
                 state.cleared = False
+                state.resolved_source = ""
+                state.last_connect_error = ""
                 state.ring_buffer.clear()
                 state.latest_jpeg = b""
                 state.latest_face_jpeg = b""
-                state.last_alert = ""
-                state.watchlist_hit = ""
-                state.repeat_hit = ""
-                state.repeat_hit_ts = 0.0
-                state.last_evidence_ts = 0.0
-                state.prev_gray = None
-                state.shake_streak = 0
-                state.rule1_active_until = 0.0
-                state.rule1_note = ""
-                state.security_stage = "clear"
+                state.previous_boxes.clear()
+                state.track_start_ts.clear()
+                self._reset_live_state(state)
             return self.status()
 
-        is_index = cleaned.isdigit() and 0 <= int(cleaned) <= 4
-        if not is_index and not _ALLOWED_STREAM_URL.match(cleaned):
-            raise ValueError("Enter a valid IP Webcam URL (http://... or rtsp://...), local camera index (0-4), 'default', or 'clear'.")
         with self._lock:
-            state.custom_source = cleaned
+            state.custom_source = normalized
             state.cleared = False
+            state.resolved_source = ""
+            state.last_connect_error = "Probing IP Webcam stream endpoints..." if normalized.lower().startswith(("http://", "https://")) and not _is_static_http_video(normalized) else ""
             state.ring_buffer.clear()
             state.latest_jpeg = b""
             state.latest_face_jpeg = b""
-            state.last_alert = ""
-            state.watchlist_hit = ""
-            state.repeat_hit = ""
-            state.repeat_hit_ts = 0.0
-            state.last_evidence_ts = 0.0
             state.previous_boxes.clear()
             state.track_start_ts.clear()
+            self._reset_live_state(state)
+            if normalized.lower().startswith(("http://", "https://")) and not _is_static_http_video(normalized):
+                self._http_clients[stream_id] = _HttpCameraClient(normalized)
         return self.status()
 
     def _resolve_source(self, state: StreamState) -> tuple[str | int | None, str, bool]:
         if state.custom_source:
             if state.custom_source.isdigit():
                 return int(state.custom_source), f"Live Camera #{state.custom_source}", True
-            return state.custom_source, f"IP Webcam ({state.custom_source[:36]})", True
+            display = state.resolved_source or state.custom_source
+            return state.custom_source, f"IP Webcam ({display[:42]})", True
 
         if state.cleared:
             return None, "Slot empty (add footage or IP Webcam)", False
@@ -990,10 +1213,17 @@ class LocalSurveillanceManager:
                         })
         return canvas
 
-    def _placeholder_jpeg(self, state: StreamState, message: str) -> bytes:
+    def _placeholder_jpeg(self, state: StreamState, message: str, detail: str = "") -> bytes:
         canvas = np.full((360, 640, 3), (17, 36, 52), dtype=np.uint8)
-        cv2.putText(canvas, f"{state.meta['id']} - {state.meta['name']}", (28, 165), cv2.FONT_HERSHEY_SIMPLEX, 0.72, (236, 240, 244), 2, cv2.LINE_AA)
-        cv2.putText(canvas, message, (28, 205), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (225, 178, 96), 1, cv2.LINE_AA)
+        cv2.putText(canvas, f"{state.meta['id']} - {state.meta['name']}", (28, 150), cv2.FONT_HERSHEY_SIMPLEX, 0.70, (236, 240, 244), 2, cv2.LINE_AA)
+        cv2.putText(canvas, message[:66], (28, 188), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (225, 178, 96), 1, cv2.LINE_AA)
+        if detail:
+            # Wrap long network diagnostics cleanly inside the 640px frame
+            line1 = detail[:66]
+            line2 = detail[66:132]
+            cv2.putText(canvas, line1, (28, 222), cv2.FONT_HERSHEY_SIMPLEX, 0.41, (244, 134, 118), 1, cv2.LINE_AA)
+            if line2:
+                cv2.putText(canvas, line2, (28, 244), cv2.FONT_HERSHEY_SIMPLEX, 0.41, (244, 134, 118), 1, cv2.LINE_AA)
         ok, jpg = cv2.imencode(".jpg", canvas, [cv2.IMWRITE_JPEG_QUALITY, 82])
         return jpg.tobytes() if ok else b""
 
@@ -1008,6 +1238,8 @@ class LocalSurveillanceManager:
     def stop(self) -> None:
         with self._lock:
             self._running = False
+            for stream_id in list(self._http_clients):
+                self._stop_http_client(stream_id)
             for state in self._streams.values():
                 state.status = "standby"
 
@@ -1024,44 +1256,87 @@ class LocalSurveillanceManager:
                             caps[stream_id].release()
                             caps.pop(stream_id, None)
                             active_sources.pop(stream_id, None)
+                        self._stop_http_client(stream_id)
                         if state.status != "no_source" or not state.latest_jpeg:
-                            state.latest_jpeg = self._placeholder_jpeg(state, "Slot available · Add Footage or IP Webcam")
+                            state.latest_jpeg = self._placeholder_jpeg(state, "Slot available - Add Footage or IP Webcam")
                         state.status = "no_source"
                         state.source_label = src_label
                         continue
+
                     src_key = str(src_val)
-                    if active_sources.get(stream_id) != src_key or stream_id not in caps or not caps[stream_id].isOpened():
+                    use_http_client = (
+                        is_live
+                        and isinstance(src_val, str)
+                        and src_val.lower().startswith(("http://", "https://"))
+                        and not _is_static_http_video(src_val)
+                    )
+
+                    frame: np.ndarray | None = None
+                    if use_http_client:
                         if stream_id in caps:
                             caps[stream_id].release()
-                        cap = cv2.VideoCapture(src_val)
-                        if is_live:
-                            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-                        caps[stream_id] = cap
-                        active_sources[stream_id] = src_key
+                            caps.pop(stream_id, None)
+                            active_sources.pop(stream_id, None)
+                        client = self._http_clients.get(stream_id)
+                        if client is None or client.url != src_key:
+                            self._stop_http_client(stream_id)
+                            client = _HttpCameraClient(src_key)
+                            self._http_clients[stream_id] = client
                         state.source_path = src_key
                         state.source_label = src_label
-
-                    cap = caps[stream_id]
-                    if is_live:
-                        cap.grab()
-                    ok, frame = cap.read()
-                    if not ok or frame is None:
-                        if is_live:
-                            state.status = "reconnecting"
-                            state.latest_jpeg = self._placeholder_jpeg(state, f"Connecting to {src_label}...")
-                            cap.release()
-                            active_sources.pop(stream_id, None)
+                        frame, connected_url, last_err = client.read_latest()
+                        state.resolved_source = connected_url
+                        state.last_connect_error = last_err
+                        if connected_url:
+                            state.source_label = f"IP Webcam ({urlsplit(connected_url).netloc}{urlsplit(connected_url).path})"
+                        if frame is None:
+                            with self._lock:
+                                self._reset_live_state(state)
+                                state.status = "reconnecting"
+                                state.latest_jpeg = self._placeholder_jpeg(
+                                    state,
+                                    f"Connecting to {src_label}...",
+                                    last_err or "Auto-probing /video, /videofeed, /shot.jpg...",
+                                )
                             continue
-                        cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-                        ok, frame = cap.read()
-                    if not ok or frame is None:
-                        state.status = "decode_error"
-                        state.latest_jpeg = self._placeholder_jpeg(state, "Could not decode local stream")
-                        continue
+                    else:
+                        self._stop_http_client(stream_id)
+                        if active_sources.get(stream_id) != src_key or stream_id not in caps or not caps[stream_id].isOpened():
+                            if stream_id in caps:
+                                caps[stream_id].release()
+                            cap = cv2.VideoCapture(src_val)
+                            if is_live:
+                                cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                            caps[stream_id] = cap
+                            active_sources[stream_id] = src_key
+                            state.source_path = src_key
+                            state.source_label = src_label
 
-                    if not is_live:
-                        for _ in range(2):
-                            cap.grab()
+                        cap = caps[stream_id]
+                        ok, read_frame = cap.read()
+                        if not ok or read_frame is None:
+                            if is_live:
+                                with self._lock:
+                                    self._reset_live_state(state)
+                                    state.status = "reconnecting"
+                                    err_hint = "Check RTSP/USB camera index & macOS camera permission" if isinstance(src_val, int) else "Waiting for RTSP / live stream packets"
+                                    state.last_connect_error = err_hint
+                                    state.latest_jpeg = self._placeholder_jpeg(state, f"Connecting to {src_label}...", err_hint)
+                                cap.release()
+                                active_sources.pop(stream_id, None)
+                                continue
+                            cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                            ok, read_frame = cap.read()
+                        if not ok or read_frame is None:
+                            state.status = "decode_error"
+                            state.latest_jpeg = self._placeholder_jpeg(state, "Could not decode local stream")
+                            continue
+
+                        if not is_live:
+                            for _ in range(2):
+                                cap.grab()
+                        state.last_connect_error = ""
+                        frame = read_frame
 
                     annotated = self._annotate_frame(state, frame, detect=True)
                     ok_jpg, jpg = cv2.imencode(".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, 78])
@@ -1078,6 +1353,8 @@ class LocalSurveillanceManager:
         finally:
             for cap in caps.values():
                 cap.release()
+            for stream_id in list(self._http_clients):
+                self._stop_http_client(stream_id)
 
     def export_live_buffer(self, stream_id: str, output_path: Path) -> bool:
         state = self._streams.get(stream_id)
@@ -1112,8 +1389,21 @@ class LocalSurveillanceManager:
             with self._lock:
                 state.latest_jpeg = jpg_bytes
             return jpg_bytes
-        if is_live and not self.is_running():
-            return self._placeholder_jpeg(state, f"Ready: {src_label}. Click Start Live AI.")
+        if is_live:
+            if not self.is_running():
+                return self._placeholder_jpeg(state, f"Ready: {src_label}. Click Start Live AI.")
+            client = self._http_clients.get(stream_id)
+            if client is not None:
+                frame, _, last_err = client.read_latest()
+                if frame is not None:
+                    annotated = self._annotate_frame(state, frame, detect=True)
+                    ok_jpg, jpg = cv2.imencode(".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, 82])
+                    if ok_jpg:
+                        with self._lock:
+                            state.latest_jpeg = jpg.tobytes()
+                        return jpg.tobytes()
+                return self._placeholder_jpeg(state, f"Connecting to {src_label}...", last_err)
+            return self._placeholder_jpeg(state, f"Connecting to {src_label}...")
         state.source_path = str(src_val)
         cap = cv2.VideoCapture(src_val)
         try:
@@ -1160,6 +1450,8 @@ class LocalSurveillanceManager:
                     "sourceAdapter": state.meta["sourceAdapter"],
                     "sourceLabel": src_label,
                     "customSource": state.custom_source,
+                    "resolvedSource": state.resolved_source,
+                    "lastError": state.last_connect_error,
                     "isLiveCamera": is_live,
                     "sourceAvailable": src_val is not None,
                     "personCount": state.person_count,
