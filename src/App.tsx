@@ -19,6 +19,17 @@ import ResponseDesk from './ResponseDesk';
 type Page = 'surveillance' | 'desk' | 'intel' | 'library' | 'search' | 'reports' | 'audit' | 'review' | 'accounts' | 'security' | 'response';
 type Toast = { kind: 'success' | 'error'; message: string } | null;
 type SlotModalTarget = { channelId: string; streamId: string; replaceClipId?: string; mode?: 'file' | 'ipcam' } | null;
+const validPages = new Set<Page>(['surveillance', 'desk', 'intel', 'library', 'search', 'reports', 'audit', 'accounts', 'security', 'response']);
+const SESSION_SYNC_KEY = 'drishti-session-sync';
+
+function announceSessionChange() {
+  try { localStorage.setItem(SESSION_SYNC_KEY, `${Date.now()}`); } catch { /* Browser storage may be disabled. */ }
+}
+
+function initialPage(): Page {
+  const tab = new URLSearchParams(window.location.search).get('tab') as Page | null;
+  return tab && validPages.has(tab) ? tab : 'desk';
+}
 
 const pageCopy: Record<Page, { title: string; subtitle: string }> = {
   desk: { title: 'PS04 · ATM Suspect Face Extraction', subtitle: 'Link ATM CCTV / DVR footage to bank transaction timestamps, extract ranked suspect faces with quality flags & export sealed evidence.' },
@@ -38,6 +49,13 @@ function App() {
   const [user, setUser] = useState<AuthUser | null>(null);
   const [setupRequired, setSetupRequired] = useState(false);
   const [authLoading, setAuthLoading] = useState(true);
+  useEffect(() => {
+    const syncSession = (event: StorageEvent) => {
+      if (event.key === SESSION_SYNC_KEY) window.location.reload();
+    };
+    window.addEventListener('storage', syncSession);
+    return () => window.removeEventListener('storage', syncSession);
+  }, []);
   useEffect(() => {
     let alive = true;
     void api.authBootstrap().then(async (bootstrap) => {
@@ -61,15 +79,15 @@ function App() {
   }, []);
 
   const signOut = async () => {
-    try { await api.authLogout(); } finally { setUser(null); }
+    try { await api.authLogout(); } finally { announceSessionChange(); setUser(null); }
   };
   if (authLoading) return <div className="auth-loading"><div className="brand-emblem"><ScanFace size={22} /></div><strong>DRISHTI</strong><span>Checking local access…</span></div>;
-  if (!user) return <AuthPortal setupRequired={setupRequired} onAuthenticated={(account) => { setSetupRequired(false); setUser(account); }} />;
+  if (!user) return <AuthPortal setupRequired={setupRequired} onAuthenticated={(account) => { announceSessionChange(); setSetupRequired(false); setUser(account); }} />;
   return <Workspace user={user} onSignOut={signOut} />;
 }
 
 function Workspace({ user, onSignOut }: { user: AuthUser; onSignOut: () => Promise<void> }) {
-  const [page, setPage] = useState<Page>('desk');
+  const [page, setPage] = useState<Page>(initialPage);
   const [clips, setClips] = useState<Clip[]>([]);
   const [cameras, setCameras] = useState<CameraSlot[]>([]);
   const [analyses, setAnalyses] = useState<Analysis[]>([]);

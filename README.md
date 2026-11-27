@@ -142,6 +142,8 @@ npm.cmd run build
 
 For the blockchain demo, use `npm.cmd run blockchain:demo` to start the app on port `8001` with the local chain.
 
+On the maintainer's Windows workstation, the ignored local helper `start-demo.ps1` starts/reuses the three local services and opens each prototype view plus the Security Portal in a separate browser tab. Run it from the repository folder with `powershell -ExecutionPolicy Bypass -File .\start-demo.ps1`. The helper and its logs are intentionally excluded from Git; on a fresh clone, follow the setup commands above and start the services manually.
+
 ## Default OpenCV Zoo models
 
 | Model | Purpose | SHA-256 |
