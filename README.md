@@ -114,6 +114,8 @@ npm run build
 .venv/bin/python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000
 ```
 
+The Security Portal does not create demo accounts. For a local demonstration, provision the first portal super admin interactively with `python scripts/provision_portal_admin.py`, then add other personnel from the portal. Do not use synthetic contact details or accounts for operational deployments.
+
 ---
 
 ## Quick setup on Windows

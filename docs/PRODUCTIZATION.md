@@ -13,6 +13,7 @@ Drishti's product wedge is **transaction-time-first evidence triage**: narrow ho
 - Local administrator/investigator accounts, pending-account approval, account disable, eight-hour HTTP-only sessions, and CSRF protection for write requests.
 - Admin-only Security Center checks SQLite integrity/foreign keys, audit links, private file modes, denied sign-ins, and network boundary; full evidence rehash sweeps are recorded and alert on mismatch.
 - AES-256-GCM, passphrase-derived SQLite metadata snapshots with an integrity-checked restore utility; portable backups do not contain the large video/candidate media tree.
+- Security Portal accounts are no longer demo-seeded at startup. The first portal super admin must be provisioned locally with `python scripts/provision_portal_admin.py`; subsequent accounts are created by an authenticated super admin.
 
 ## Before any operational pilot
 

@@ -116,7 +116,6 @@ async function secRequest<T>(path: string, init?: RequestInit): Promise<T> {
 
 export const portalApi = {
   health: () => secRequest<{ status: string; service: string; usersCount: number; activeAlerts: number; observations: number }>('/health'),
-  demoSeed: () => secRequest<{ seeded: number; accounts: { role: string; employeeId: string; email: string; hint: string }[] }>('/auth/demo-seed', { method: 'POST' }),
   me: async () => {
     const r = await secRequest<{ authenticated?: boolean; user: PortalUser | null; csrfToken: string }>('/auth/me');
     if (r.csrfToken) setPortalCsrf(r.csrfToken);
