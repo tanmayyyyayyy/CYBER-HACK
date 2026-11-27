@@ -14,8 +14,9 @@ import {
   DatabaseBackup, EventItem, FaceVisibility, formatBytes, formatDuration, Health, JournalRow,
   LiveEvidenceResponse, LiveEvidenceSubject, LiveIncident, ReportsData, SecurityOverview, StreamDetection, StreamsResponse, WatchlistEntry,
 } from './api';
+import ResponseDesk from './ResponseDesk';
 
-type Page = 'surveillance' | 'desk' | 'intel' | 'library' | 'search' | 'reports' | 'audit' | 'review' | 'accounts' | 'security';
+type Page = 'surveillance' | 'desk' | 'intel' | 'library' | 'search' | 'reports' | 'audit' | 'review' | 'accounts' | 'security' | 'response';
 type Toast = { kind: 'success' | 'error'; message: string } | null;
 type SlotModalTarget = { channelId: string; streamId: string; replaceClipId?: string; mode?: 'file' | 'ipcam' } | null;
 
@@ -30,6 +31,7 @@ const pageCopy: Record<Page, { title: string; subtitle: string }> = {
   review: { title: 'Evidence review', subtitle: 'Compare raw and enhanced frames, inspect lighting, redact bystanders, flag suspect & seal evidence.' },
   accounts: { title: 'Access control', subtitle: 'Approve local investigator accounts and revoke access.' },
   security: { title: 'Security center', subtitle: 'Database health, SHA-256 sweeps, AES-256-GCM backups, and manifest seal verification.' },
+  response: { title: 'Authority response desk', subtitle: 'Demonstrate alert triage, investigator handoff, and activity history using a fictional incident.' },
 };
 
 function App() {
@@ -195,6 +197,7 @@ function Workspace({ user, onSignOut }: { user: AuthUser; onSignOut: () => Promi
       <NavItem active={page === 'desk' || page === 'review'} label="Case desk" icon={<House size={15} />} onClick={() => { setPage('desk'); setSmallNavOpen(false); }} />
       <NavItem active={page === 'surveillance'} label="Real-time AI" icon={<Radio size={15} />} count={streamsState?.running ? 4 : undefined} onClick={() => { setPage('surveillance'); setSmallNavOpen(false); }} />
       <NavItem active={page === 'intel'} label="Case intel" icon={<ShieldAlert size={15} />} count={watchlist.length || undefined} onClick={() => { setPage('intel'); setSmallNavOpen(false); }} />
+      <NavItem active={page === 'response'} label="Response desk" icon={<Bell size={15} />} onClick={() => { setPage('response'); setSmallNavOpen(false); }} />
       <NavItem active={page === 'library'} label="Video library" icon={<Camera size={15} />} count={clips.length || undefined} onClick={() => { setPage('library'); setSmallNavOpen(false); }} />
       <NavItem active={page === 'search'} label="Face search" icon={<ScanFace size={15} />} onClick={() => openSearch()} />
       <NavItem active={page === 'reports'} label="Reports" icon={<BarChart3 size={15} />} onClick={() => { setPage('reports'); setSmallNavOpen(false); }} />
@@ -304,6 +307,7 @@ function Workspace({ user, onSignOut }: { user: AuthUser; onSignOut: () => Promi
               onToast={setToast}
             />
           )}
+          {page === 'response' && <ResponseDesk user={user} clips={clips} analyses={analyses} audit={audit} auditIntegrity={auditIntegrity} onReview={openReview} />}
           {page === 'library' && (
             <Library
               clips={clips}

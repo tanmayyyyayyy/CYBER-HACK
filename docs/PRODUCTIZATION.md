@@ -26,6 +26,7 @@ This is a **hackathon demonstrator**, not an operational security product. Use s
 - Runtime capability reporting now defaults the overall service to demonstration/mock status while production gates remain open. The UI warns that active evidence encryption is unverified and instructs users not to load real investigative footage.
 - Optional HTTPS webhook adapters support external audit checkpoints and priority alert events. They report only endpoint acceptance, do not establish independent custody or confirm human dispatch, and remain mock when their required settings are absent or invalid.
 - An administrator can preview and manually run clip retention when `DRISHTI_RETENTION_DAYS` is a positive integer. No background deletion occurs; live identity and incident records are outside this clip-only action.
+- The Authority Response Desk demonstrates fictional alert triage, creates a metadata-only draft handoff from a local analysis, and separates actual workspace audit entries from browser-local simulated actions. It does not send alerts or create a certified handoff.
 
 ## Before any operational pilot
 
