@@ -6,6 +6,7 @@ import collections
 import concurrent.futures
 import hashlib
 import json
+import logging
 import os
 import re
 import subprocess
@@ -28,7 +29,10 @@ try:
 except Exception:
     pass
 
-from backend import analysis, store
+from backend import advanced_vision, analysis, store
+from backend.camera_tamper import CameraTamper
+
+logger = logging.getLogger(__name__)
 
 
 def _dispatch_security_bridge(payload: dict[str, Any]) -> None:
@@ -54,7 +58,7 @@ def _dispatch_security_bridge(payload: dict[str, Any]) -> None:
                 from security_portal import router as sec_router
                 sec_router.ingest_bridge_payload(sec_router.BridgeEventRequest(**payload))
             except Exception:
-                pass
+                logger.exception("Security portal could not accept a camera event")
 
     threading.Thread(target=_worker, daemon=True).start()
 
@@ -249,11 +253,11 @@ class _HttpCameraClient:
     def stop(self) -> None:
         self._stop.set()
 
-    def read_latest(self, max_age: float = 4.5) -> tuple[np.ndarray | None, str, str]:
+    def read_latest(self, max_age: float = 4.5) -> tuple[np.ndarray | None, str, str, float]:
         with self._lock:
             fresh = self._frame is not None and (time.monotonic() - self._frame_ts) <= max_age
             frame = self._frame.copy() if fresh and self._frame is not None else None
-            return frame, self._connected_url, self._last_error
+            return frame, self._connected_url, self._last_error, self._frame_ts
 
     @staticmethod
     def _build_request(candidate: str) -> urllib.request.Request:
@@ -454,6 +458,17 @@ class StreamState:
     last_bridge_obs_ts: float = 0.0
     last_bridge_esc_ts: float = 0.0
     last_incident_ts: dict[str, float] = field(default_factory=dict)
+    camera_tamper: CameraTamper = field(default_factory=CameraTamper)
+    last_read_at: float = 0.0
+    latest_face_monotonic: float = 0.0
+    dropout_reported: bool = False
+    byte_tracker: Any = None
+    tracker_label: str = "IoU"
+    zone_dwell: advanced_vision.ZoneDwell = field(default_factory=advanced_vision.ZoneDwell)
+    welfare_start: float | None = None
+    welfare_anchor: tuple[float, float] | None = None
+    welfare_track_id: int | None = None
+    welfare_reported: bool = False
     ring_buffer: collections.deque[np.ndarray] = field(default_factory=lambda: collections.deque(maxlen=120))
 
 
@@ -924,15 +939,19 @@ class LocalSurveillanceManager:
         except Exception:
             return self._watchlist_cache
 
-    def _annotate_frame(self, state: StreamState, frame: np.ndarray, detect: bool = True) -> np.ndarray:
+    def _annotate_frame(self, state: StreamState, frame: np.ndarray, detect: bool = True, source_time: float | None = None) -> np.ndarray:
         raw = cv2.resize(frame, (640, 360), interpolation=cv2.INTER_AREA)
+        camera_signal = state.camera_tamper.observe(raw) if detect else ""
         state.ring_buffer.append(raw.copy())
         canvas = raw.copy()
         h, w = raw.shape[:2]
         frame_area = float(w * h)
         now_mono = time.monotonic()
 
-        zx1, zy1, zx2, zy2 = int(w * 0.22), int(h * 0.16), int(w * 0.84), int(h * 0.94)
+        zones = advanced_vision.camera_zones(state.meta["id"])
+        zx1, zy1, zx2, zy2 = advanced_vision.pixels(zones.atm, w, h)
+        guard_zone = advanced_vision.pixels(zones.guard, w, h) if zones.guard else None
+        zone_time = now_mono if source_time is None else source_time
 
         alert_msg = ""
         alert_kind = ""
@@ -941,19 +960,37 @@ class LocalSurveillanceManager:
         face_boxes_to_draw: list[tuple[int, int, int, int, str, tuple[int, int, int]]] = []
         face_hits = 0
         watchlist_match_label = ""
+        monitoring_events = []
 
         if detect:
             # 1) Run person detector on CLEAN raw frame (never on overlay graphics!)
-            raw_boxes = analysis.detect_person_boxes(raw)
+            raw_boxes = advanced_vision.person_boxes(raw)
+            if raw_boxes is None:
+                raw_boxes = analysis.detect_person_boxes(raw)
+                min_confidence = .60
+                state.byte_tracker = None
+                state.tracker_label = "OpenCV person detector + IoU"
+            else:
+                min_confidence = .10
+                state.tracker_label = "YOLOv8n + IoU"
+                if state.byte_tracker is None:
+                    state.byte_tracker = advanced_vision.new_tracker()
+                if state.byte_tracker is None:
+                    min_confidence = .34
             filtered_boxes = []
             for x1, y1, x2, y2, conf in raw_boxes:
                 bw, bh = max(0, x2 - x1), max(0, y2 - y1)
-                if conf >= 0.60 and (bw * bh) >= frame_area * 0.022 and bh >= 48 and bw >= 24:
+                if conf >= min_confidence and (bw * bh) >= frame_area * 0.022 and bh >= 48 and bw >= 24:
                     filtered_boxes.append((x1, y1, x2, y2, conf))
 
-            tracks, state.previous_boxes, state.next_track_id = analysis.match_tracks(
-                filtered_boxes, state.previous_boxes, state.next_track_id
-            )
+            if state.byte_tracker is not None:
+                tracks = advanced_vision.track_people(state.byte_tracker, filtered_boxes, raw)
+                state.tracker_label = "YOLOv8n + ByteTrack"
+                state.previous_boxes = {tid: box[:4] for tid, box in tracks}
+            else:
+                tracks, state.previous_boxes, state.next_track_id = analysis.match_tracks(
+                    filtered_boxes, state.previous_boxes, state.next_track_id
+                )
             active_ids = {tid for tid, _ in tracks}
             for old_id in list(state.track_start_ts):
                 if old_id not in active_ids:
@@ -967,6 +1004,30 @@ class LocalSurveillanceManager:
                 for tid, box in tracks
                 if zx1 <= (box[0] + box[2]) / 2 <= zx2 and zy1 <= (box[1] + box[3]) / 2 <= zy2
             ]
+            dwell_event = state.zone_dwell.update(active_ids, set(in_zone), zone_time, zones.dwell_seconds)
+            if dwell_event:
+                tid, seconds = dwell_event
+                monitoring_events.append(("stream.atm_zone_dwell", f"Track {tid} spent {seconds:.0f}s in the ATM zone. Review the activity."))
+
+            if guard_zone:
+                gx1, gy1, gx2, gy2 = guard_zone
+                occupants = [(tid, box) for tid, box in tracks if gx1 <= (box[0] + box[2]) / 2 <= gx2 and gy1 <= (box[1] + box[3]) / 2 <= gy2]
+                if len(occupants) == 1 and advanced_vision.head_down(raw[gy1:gy2, gx1:gx2]):
+                    tid, (x1, y1, x2, y2, _) = occupants[0]
+                    center = ((x1 + x2) / 2, (y1 + y2) / 2)
+                    if state.welfare_track_id != tid or state.welfare_anchor is None or np.linalg.norm(np.subtract(center, state.welfare_anchor)) > 12:
+                        state.welfare_track_id = tid
+                        state.welfare_anchor = center
+                        state.welfare_start = zone_time
+                        state.welfare_reported = False
+                    if state.welfare_start is not None and zone_time - state.welfare_start >= zones.welfare_seconds and not state.welfare_reported:
+                        state.welfare_reported = True
+                        monitoring_events.append(("stream.guard_welfare_check", "Sustained head-down posture with limited movement in the guard zone. Welfare check suggested."))
+                else:
+                    state.welfare_track_id = None
+                    state.welfare_anchor = None
+                    state.welfare_start = None
+                    state.welfare_reported = False
 
             if len(in_zone) >= 2:
                 alert_kind = "stream.shoulder_surfing"
@@ -1141,6 +1202,7 @@ class LocalSurveillanceManager:
                     state.latest_face_score = round(best_face_score, 1)
                     state.latest_face_flags = best_face_flags
                     state.latest_face_at = _now_iso()
+                    state.latest_face_monotonic = now_mono
 
             # Also catch full motorcycle helmet / obscured face when person stays inside ATM zone >= 3.0s with zero visible faces
             if in_zone and face_hits == 0 and max_dwell >= 3.0 and state.rule1_active_until <= now_mono:
@@ -1237,6 +1299,10 @@ class LocalSurveillanceManager:
         # 3) Now draw crisp overlays AFTER all AI inference is done
         cv2.rectangle(canvas, (zx1, zy1), (zx2, zy2), (72, 138, 178), 1, cv2.LINE_AA)
         cv2.putText(canvas, "ATM ZONE", (zx1 + 8, zy1 + 18), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (150, 205, 235), 1, cv2.LINE_AA)
+        if guard_zone:
+            gx1, gy1, gx2, gy2 = guard_zone
+            cv2.rectangle(canvas, (gx1, gy1), (gx2, gy2), (78, 200, 155), 1, cv2.LINE_AA)
+            cv2.putText(canvas, "GUARD ZONE", (gx1 + 4, gy1 + 15), cv2.FONT_HERSHEY_SIMPLEX, .4, (78, 200, 155), 1, cv2.LINE_AA)
 
         for tid, (x1, y1, x2, y2, conf) in tracks:
             dwell = now_mono - state.track_start_ts.get(tid, now_mono)
@@ -1317,7 +1383,62 @@ class LocalSurveillanceManager:
                             "snapshot_url": f"/api/live-incidents/{inc_id}/image",
                             "snapshot_sha256": digest,
                         })
+        if camera_signal:
+            state.last_alert = camera_signal
+            state.alert_state = "alert"
+            state.security_stage = "alert_escalated"
+            self._record_camera_alert(state, raw, camera_signal)
+        for kind, message in monitoring_events:
+            state.last_alert = message
+            state.alert_state = "alert"
+            self._record_camera_alert(state, canvas, message, kind=kind)
         return canvas
+
+    def _record_camera_alert(self, state: StreamState, frame: np.ndarray, reason: str, kind: str = "stream.camera_tamper") -> None:
+        incident_id = uuid.uuid4().hex
+        stamp = _now_iso()
+        photo = frame.copy()
+        face = None
+        interference = kind == "stream.camera_tamper"
+        if interference and state.latest_face_jpeg and time.monotonic() - state.latest_face_monotonic <= 7:
+            face = cv2.imdecode(np.frombuffer(state.latest_face_jpeg, np.uint8), cv2.IMREAD_COLOR)
+        if face is not None:
+            scale = min(150 / face.shape[1], 180 / face.shape[0])
+            crop = cv2.resize(face, None, fx=scale, fy=scale)
+            sidebar = np.full((photo.shape[0], 192, 3), (24, 38, 52), np.uint8)
+            sidebar[52:52 + crop.shape[0], 18:18 + crop.shape[1]] = crop
+            cv2.putText(sidebar, "Recent face on feed", (10, 22), cv2.FONT_HERSHEY_SIMPLEX, .43, (245, 245, 245), 1)
+            cv2.putText(sidebar, state.latest_face_at[11:19] + " UTC", (10, 42), cv2.FONT_HERSHEY_SIMPLEX, .43, (245, 245, 245), 1)
+            photo = cv2.hconcat([photo, sidebar])
+        ok, encoded = cv2.imencode(".jpg", photo, [cv2.IMWRITE_JPEG_QUALITY, 92])
+        if not ok:
+            return
+        contents = encoded.tobytes()
+        digest = hashlib.sha256(contents).hexdigest()
+        path = store.LIVE_EVIDENCE / f"inc-{incident_id}.jpg"
+        camera_id, atm_id = state.meta["id"], state.meta["channelId"]
+        severity = "critical" if interference else "warning"
+        summary = (f"{reason} at {atm_id}. " + ("Recent face attached for review." if face is not None else "No recent face available.")) if interference else f"{atm_id} · {reason}"
+        try:
+            store.LIVE_EVIDENCE.mkdir(parents=True, exist_ok=True, mode=0o700)
+            path.write_bytes(contents)
+            path.chmod(0o600)
+            with store.connect() as db:
+                db.execute("INSERT INTO live_incidents VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                           (incident_id, camera_id, kind, severity, summary, "", state.person_count,
+                            int(face is not None), str(path), digest, stamp))
+                db.execute("INSERT INTO events VALUES(?,?,?,?,?,?,?,?)",
+                           (uuid.uuid4().hex, None, None, kind, summary, severity, stamp, json.dumps({"incidentId": incident_id, "cameraId": camera_id})))
+                store.append_audit(db, "camera.interference_flagged" if interference else kind, incident_id, f"{summary} Snapshot SHA-256 {digest}.", stamp)
+        except Exception:
+            logger.exception("Could not save camera incident %s", incident_id)
+            return
+        if not interference:
+            return
+        _dispatch_security_bridge({"camera_id": camera_id, "atm_id": atm_id, "stage": "escalate",
+                                   "rule_code": "RULE_2_ATM_TAMPER_OR_FORCE", "incident_kind": kind,
+                                   "severity": "critical", "summary": summary,
+                                   "snapshot_url": f"/api/live-incidents/{incident_id}/image", "snapshot_sha256": digest})
 
     def _placeholder_jpeg(self, state: StreamState, message: str, detail: str = "") -> bytes:
         canvas = np.full((360, 640, 3), (17, 36, 52), dtype=np.uint8)
@@ -1349,6 +1470,24 @@ class LocalSurveillanceManager:
             for state in self._streams.values():
                 state.status = "standby"
 
+    @staticmethod
+    def _reset_monitoring(state: StreamState) -> None:
+        state.camera_tamper = CameraTamper()
+        state.latest_face_monotonic = 0.0
+        state.byte_tracker = None
+        state.zone_dwell = advanced_vision.ZoneDwell()
+        state.welfare_anchor = None
+        state.welfare_track_id = None
+        state.welfare_start = None
+        state.welfare_reported = False
+        state.previous_boxes.clear()
+        state.track_start_ts.clear()
+
+    def _check_camera_dropout(self, state: StreamState) -> None:
+        if state.last_read_at and state.ring_buffer and not state.dropout_reported and time.monotonic() - state.last_read_at >= 5:
+            state.dropout_reported = True
+            self._record_camera_alert(state, state.ring_buffer[-1], "Previously active camera stopped delivering frames")
+
     def _run_loop(self) -> None:
         caps: dict[str, cv2.VideoCapture] = {}
         active_sources: dict[str, str] = {}
@@ -1358,6 +1497,7 @@ class LocalSurveillanceManager:
                 for stream_id, state in self._streams.items():
                     src_val, src_label, is_live = self._resolve_source(state)
                     if src_val is None:
+                        state.source_path = ""
                         if stream_id in caps:
                             caps[stream_id].release()
                             caps.pop(stream_id, None)
@@ -1370,6 +1510,13 @@ class LocalSurveillanceManager:
                         continue
 
                     src_key = str(src_val)
+                    if state.source_path != src_key:
+                        self._reset_monitoring(state)
+                        state.last_read_at = 0.0
+                        state.dropout_reported = False
+                        state.ring_buffer.clear()
+                    source_time = None
+                    delivered_at = time.monotonic()
                     use_http_client = (
                         is_live
                         and isinstance(src_val, str)
@@ -1390,12 +1537,14 @@ class LocalSurveillanceManager:
                             self._http_clients[stream_id] = client
                         state.source_path = src_key
                         state.source_label = src_label
-                        frame, connected_url, last_err = client.read_latest()
+                        frame, connected_url, last_err, delivered_at = client.read_latest()
                         state.resolved_source = connected_url
                         state.last_connect_error = last_err
                         if connected_url:
-                            state.source_label = f"IP Webcam ({urlsplit(connected_url).netloc}{urlsplit(connected_url).path})"
+                            parts = urlsplit(connected_url)
+                            state.source_label = f"IP Webcam ({parts.netloc.rsplit('@', 1)[-1]}{parts.path})"
                         if frame is None:
+                            self._check_camera_dropout(state)
                             with self._lock:
                                 self._reset_live_state(state)
                                 state.status = "reconnecting"
@@ -1404,6 +1553,8 @@ class LocalSurveillanceManager:
                                     f"Connecting to {src_label}...",
                                     last_err or "Auto-probing /video, /videofeed, /shot.jpg...",
                                 )
+                            continue
+                        if delivered_at <= state.last_read_at:
                             continue
                     else:
                         self._stop_http_client(stream_id)
@@ -1422,6 +1573,7 @@ class LocalSurveillanceManager:
                         ok, read_frame = cap.read()
                         if not ok or read_frame is None:
                             if is_live:
+                                self._check_camera_dropout(state)
                                 with self._lock:
                                     self._reset_live_state(state)
                                     state.status = "reconnecting"
@@ -1432,6 +1584,7 @@ class LocalSurveillanceManager:
                                 active_sources.pop(stream_id, None)
                                 continue
                             cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                            self._reset_monitoring(state)
                             ok, read_frame = cap.read()
                         if not ok or read_frame is None:
                             state.status = "decode_error"
@@ -1439,12 +1592,16 @@ class LocalSurveillanceManager:
                             continue
 
                         if not is_live:
+                            source_time = cap.get(cv2.CAP_PROP_POS_MSEC) / 1000
                             for _ in range(2):
                                 cap.grab()
+                        delivered_at = time.monotonic()
                         state.last_connect_error = ""
                         frame = read_frame
+                    state.last_read_at = delivered_at
+                    state.dropout_reported = False
 
-                    annotated = self._annotate_frame(state, frame, detect=True)
+                    annotated = self._annotate_frame(state, frame, detect=True, source_time=source_time)
                     ok_jpg, jpg = cv2.imencode(".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, 78])
                     if ok_jpg:
                         with self._lock:
@@ -1500,24 +1657,21 @@ class LocalSurveillanceManager:
                 return self._placeholder_jpeg(state, f"Ready: {src_label}. Click Start Live AI.")
             client = self._http_clients.get(stream_id)
             if client is not None:
-                frame, _, last_err = client.read_latest()
+                frame, _, last_err, _ = client.read_latest()
                 if frame is not None:
-                    annotated = self._annotate_frame(state, frame, detect=True)
-                    ok_jpg, jpg = cv2.imencode(".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, 82])
+                    ok_jpg, jpg = cv2.imencode(".jpg", cv2.resize(frame, (640, 360)), [cv2.IMWRITE_JPEG_QUALITY, 82])
                     if ok_jpg:
                         with self._lock:
                             state.latest_jpeg = jpg.tobytes()
                         return jpg.tobytes()
                 return self._placeholder_jpeg(state, f"Connecting to {src_label}...", last_err)
             return self._placeholder_jpeg(state, f"Connecting to {src_label}...")
-        state.source_path = str(src_val)
         cap = cv2.VideoCapture(src_val)
         try:
             ok, frame = cap.read()
             if not ok or frame is None:
                 return self._placeholder_jpeg(state, "Preview unavailable")
-            annotated = self._annotate_frame(state, frame, detect=True)
-            ok_jpg, jpg = cv2.imencode(".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, 82])
+            ok_jpg, jpg = cv2.imencode(".jpg", cv2.resize(frame, (640, 360)), [cv2.IMWRITE_JPEG_QUALITY, 82])
             if ok_jpg:
                 with self._lock:
                     state.latest_jpeg = jpg.tobytes()
@@ -1555,6 +1709,7 @@ class LocalSurveillanceManager:
                     "status": state.status if (self.is_running() and src_val is not None) else ("ready" if src_val is not None else "no_source"),
                     "sourceAdapter": state.meta["sourceAdapter"],
                     "sourceLabel": src_label,
+                    "trackingEngine": state.tracker_label if state.last_read_at else "",
                     "customSource": state.custom_source,
                     "resolvedSource": state.resolved_source,
                     "lastError": state.last_connect_error,

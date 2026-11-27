@@ -63,12 +63,25 @@ export type AnalysisAlert = {
   message: string;
 };
 
+export type FaceVisibility = 'visible' | 'covered' | 'unavailable';
+export type FootageObservation = {
+  id: string;
+  time: number;
+  visibility: FaceVisibility;
+  note: string;
+  actorId: string;
+  recordedAt: string;
+  incident: { id: string; kind: string; occurred_at: string } | null;
+};
+
 export type Analysis = {
   id: string;
   clipId: string;
   clipName: string;
+  cameraId?: string;
   transactionTime: string;
   transactionRef: string;
+  transactionOffsetSeconds?: number | null;
   caseRef?: string;
   timeMode: 'clip' | 'absolute';
   clipStartTime: string;
@@ -80,6 +93,9 @@ export type Analysis = {
     windowStart?: number;
     windowEnd?: number;
     sampledFrames?: number;
+    personFrames?: number;
+    personWithoutFaceSamples?: number[];
+    trackingEngine?: string;
     peopleSeen?: number;
     primaryTerminalTrack?: number | null;
     candidateCount?: number;
@@ -89,6 +105,7 @@ export type Analysis = {
     models?: Record<string, string>;
   };
   candidates: Candidate[];
+  observations?: FootageObservation[];
 };
 
 export type SurveillanceStream = {
@@ -99,6 +116,7 @@ export type SurveillanceStream = {
   status: string;
   sourceAdapter: string;
   sourceLabel: string;
+  trackingEngine?: string;
   customSource?: string;
   resolvedSource?: string;
   lastError?: string;
@@ -327,6 +345,7 @@ export const api = {
   cameras: () => request<CameraSlot[]>('/cameras'),
   analyses: () => request<Analysis[]>('/analyses'),
   analysis: (id: string) => request<Analysis>(`/analyses/${id}`),
+  recordFootageObservation: (analysisId: string, observation: {time: number; visibility: FaceVisibility; note: string; incidentId: string}) => request<{id: string}>(`/analyses/${analysisId}/observations`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(observation) }),
   events: () => request<EventItem[]>('/events'),
   audit: () => request<AuditItem[]>('/audit'),
   auditIntegrity: () => request<AuditIntegrity>('/audit/integrity'),

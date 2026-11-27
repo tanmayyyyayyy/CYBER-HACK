@@ -1,0 +1,3 @@
+# Optional Ultralytics runtime. Review the model and runtime license before distribution.
+ultralytics==8.4.220
+lap>=0.5.12

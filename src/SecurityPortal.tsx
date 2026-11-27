@@ -320,6 +320,7 @@ function PortalWorkspace({ user, onUserUpdate, onSignOut, toast, onToast }: {
     return alerts.find((a) => {
       if (a.status === 'resolved' || a.status === 'acknowledged') return false;
       if (!a.sirenActive) return false;
+      if (a.incidentKind === 'stream.camera_tamper') return true;
       if (user.role === 'super_admin') return true;
       if (user.role === 'guard' && a.currentPriority === 1) return true;
       if (user.role === 'atm_admin' && a.currentPriority >= 2) return true;
