@@ -310,6 +310,22 @@ export type ReportsData = {
 
 let csrfToken = '';
 export const setCsrfToken = (value: string) => { csrfToken = value; };
+export const MAX_CLIP_BYTES = 500_000_000;
+
+function errorDetail(detail: unknown, status: number): string {
+  if (typeof detail === 'string' && detail.trim()) return detail;
+  if (Array.isArray(detail)) {
+    const errors = detail.filter((item): item is { loc?: unknown; msg?: unknown; type?: unknown; ctx?: { min_length?: unknown } } => !!item && typeof item === 'object');
+    const passwordError = errors.find((item) => Array.isArray(item.loc) && item.loc.includes('password') && item.type === 'string_too_short');
+    if (passwordError && typeof passwordError.ctx?.min_length === 'number') {
+      return `Password mein kam se kam ${passwordError.ctx.min_length} characters likhein.`;
+    }
+    const descriptions = errors.map((item) => typeof item.msg === 'string' ? item.msg : '').filter(Boolean);
+    if (descriptions.length) return descriptions.join(' ');
+  }
+  if (detail && typeof detail === 'object' && 'message' in detail && typeof detail.message === 'string') return detail.message;
+  return `Request poori nahi hui (${status}). Di hui jankari check karein.`;
+}
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const headers = new Headers(init?.headers);
@@ -318,9 +334,41 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   if (!response.ok) {
     const payload = await response.json().catch(() => ({}));
     if (response.status === 401 && path !== '/auth/login') window.dispatchEvent(new Event('drishti:session-expired'));
-    throw new Error(payload.detail || `Request failed (${response.status})`);
+    throw new Error(errorDetail(payload.detail, response.status));
   }
   return response.json() as Promise<T>;
+}
+
+function uploadRequest(file: File, cameraId: string, replaceClipId: string, onProgress?: (percent: number) => void, signal?: AbortSignal): Promise<Clip> {
+  if (file.size > MAX_CLIP_BYTES) return Promise.reject(new Error('Video 500 MB se bada hai. Chhota clip upload karein.'));
+  if (signal?.aborted) return Promise.reject(new DOMException('Upload rok diya gaya.', 'AbortError'));
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    const path = `/api/clips?filename=${encodeURIComponent(file.name)}&camera_id=${encodeURIComponent(cameraId)}${replaceClipId ? `&replace_clip_id=${encodeURIComponent(replaceClipId)}` : ''}`;
+    xhr.open('POST', path);
+    xhr.withCredentials = true;
+    xhr.timeout = 15 * 60 * 1000;
+    xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+    if (csrfToken) xhr.setRequestHeader('X-CSRF-Token', csrfToken);
+    xhr.upload.onprogress = (event) => { if (event.lengthComputable && event.total) onProgress?.(Math.round(event.loaded / event.total * 100)); };
+    xhr.upload.onload = () => onProgress?.(100);
+    xhr.onload = () => {
+      const payload = (() => { try { return JSON.parse(xhr.responseText); } catch { return {}; } })();
+      if (xhr.status >= 200 && xhr.status < 300) resolve(payload as Clip);
+      else {
+        if (xhr.status === 401) window.dispatchEvent(new Event('drishti:session-expired'));
+        reject(new Error(errorDetail(payload.detail, xhr.status)));
+      }
+    };
+    xhr.onerror = () => reject(new Error('Server se connection nahi bana. Dobara koshish karein.'));
+    xhr.ontimeout = () => reject(new Error('Video check mein bahut waqt lag gaya. Chhota clip upload karein.'));
+    xhr.onabort = () => reject(new DOMException('Upload rok diya gaya.', 'AbortError'));
+    const abort = () => xhr.abort();
+    signal?.addEventListener('abort', abort, { once: true });
+    xhr.onloadend = () => signal?.removeEventListener('abort', abort);
+    if (signal?.aborted) xhr.abort();
+    else xhr.send(file);
+  });
 }
 
 export const api = {
@@ -361,9 +409,8 @@ export const api = {
     request<{ clipId: string; clipFilename: string; totalRows: number; inClipCount: number; queuedAnalyses: string[]; rows: JournalRow[] }>('/journal/match', {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
     }),
-  upload: (file: File, cameraId: string, replaceClipId = '') => request<Clip>(`/clips?filename=${encodeURIComponent(file.name)}&camera_id=${cameraId}${replaceClipId ? `&replace_clip_id=${encodeURIComponent(replaceClipId)}` : ''}`, {
-    method: 'POST', headers: { 'Content-Type': 'application/octet-stream' }, body: file,
-  }),
+  upload: (file: File, cameraId: string, replaceClipId = '', onProgress?: (percent: number) => void, signal?: AbortSignal) =>
+    uploadRequest(file, cameraId, replaceClipId, onProgress, signal),
   clearStreamAlerts: () => request<{ cleared: number }>('/events/clear-stream-alerts', { method: 'POST' }),
   watchlist: () => request<WatchlistEntry[]>('/watchlist'),
   addToWatchlist: (candidate_id: string, label: string, case_ref = '') => request<WatchlistEntry>('/watchlist', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ candidate_id, label, case_ref }) }),
