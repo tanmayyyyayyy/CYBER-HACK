@@ -1,8 +1,8 @@
 import { useState } from 'react';
 import { api, type Analysis, type Candidate, type FaceEnhancement } from './api';
 
-export default function CrossCameraFaceReview({ analyses }: { analyses: Analysis[] }) {
-  const [ids, setIds] = useState<string[]>([]);
+export default function CrossCameraFaceReview({ analyses, initialCandidateId }: { analyses: Analysis[]; initialCandidateId?: string }) {
+  const [ids, setIds] = useState<string[]>(initialCandidateId ? [initialCandidateId] : []);
   const [confirmed, setConfirmed] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');

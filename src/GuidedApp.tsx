@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import LoginHeadline from './LoginHeadline';
 import { api, MAX_CLIP_BYTES, type Analysis, type AuthUser, type Candidate, type Clip, formatDuration, formatBytes } from './api';
 import FrameInspector from './FrameInspector';
+import CrossCameraFaceReview from './FaceEnhancement';
 import '@fontsource/noto-sans/400.css';
 import '@fontsource/noto-sans/700.css';
 import '@fontsource/noto-sans-devanagari/400.css';
@@ -9,7 +10,7 @@ import '@fontsource/noto-sans-devanagari/700.css';
 import './guided.css';
 
 const steps = ['Login', 'Naya case', 'Video upload', 'File check', 'Transaction', 'Scan', 'Person chunein', 'Best frames', 'Dusri clips', 'Evidence sheet'];
-type Draft = { step: number; caseNumber: string; atmId: string; clipId: string; analysisId: string; selectedId: string; uncertain: boolean; reviewed: boolean; timeMode: 'clip' | 'absolute'; transactionTime: string; clipStart: string; windowSeconds: number; note: string };
+type Draft = { step: number; caseNumber: string; atmId: string; clipId: string; analysisId: string; selectedId: string; uncertain: boolean; reviewed: boolean; timeMode: 'clip' | 'absolute'; transactionTime: string; clipStart: string; windowSeconds: number; note: string; extraClipId?: string; extraAnalysisId?: string };
 const fresh: Draft = { step: 1, caseNumber: '', atmId: '', clipId: '', analysisId: '', selectedId: '', uncertain: false, reviewed: false, timeMode: 'clip', transactionTime: '', clipStart: '', windowSeconds: 30, note: '' };
 function savedDraft(): Draft { try { return { ...fresh, ...JSON.parse(localStorage.getItem('drishti-tool-draft') || '{}') }; } catch { return fresh; } }
 function message(error: unknown) { return error instanceof Error && error.name === 'AbortError' ? 'Upload ka wait roka gaya. Server par file check kuch der chal sakta hai.' : error instanceof Error ? error.message : 'Kuch galat hua. Dobara koshish karein.'; }
@@ -20,6 +21,9 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [draft, setDraft] = useState<Draft>(savedDraft);
   const [clips, setClips] = useState<Clip[]>([]);
+  const [extraAnalysis, setExtraAnalysis] = useState<Analysis | null>(null);
+  const [extraTime, setExtraTime] = useState('');
+  const [extraCamera, setExtraCamera] = useState('ATM-02');
   const [analysis, setAnalysis] = useState<Analysis | null>(null);
   const [matches, setMatches] = useState<(Candidate & { similarity: number; filename: string })[]>([]);
   const [inspectedCandidate, setInspectedCandidate] = useState<Candidate | null>(null);
@@ -64,13 +68,37 @@ export default function App() {
     return () => { active = false; window.clearInterval(timer); };
   }, [user, draft.analysisId, draft.step, analysis?.status]);
 
+  useEffect(() => {
+    if (!user || draft.step !== 8 || !draft.extraAnalysisId) return;
+    const id = draft.extraAnalysisId;
+    let active = true;
+    let timer: number | undefined;
+    const poll = async () => {
+      try {
+        const result = await api.analysis(id);
+        if (!active) return;
+        setExtraAnalysis(result);
+        if (result.status === 'queued' || result.status === 'running') {
+          timer = window.setTimeout(() => void poll(), 1500);
+        }
+      } catch (err) {
+        if (active) {
+          setError(message(err));
+          setDraft((current) => current.extraAnalysisId === id ? { ...current, extraAnalysisId: '' } : current);
+        }
+      }
+    };
+    void poll();
+    return () => { active = false; window.clearTimeout(timer); };
+  }, [user, draft.step, draft.extraAnalysisId]);
+
   const run = async (work: () => Promise<void>) => { setBusy(true); setError(''); try { await work(); } catch (err) { setError(message(err)); } finally { setBusy(false); } };
   const submitAuth = (event: React.FormEvent) => { event.preventDefault(); void run(async () => {
     if (authMode === 'login') { const result = await api.authLogin(email, password); setUser(result.user); }
     else { const result = await api.authSignup(displayName, email, password); if (result.approvalRequired) { setPending(true); setAuthMode('login'); } else setUser(result.user); }
     setShowPassword(false);
   }); };
-  const upload = (file: File | undefined) => {
+  const upload = (file: File | undefined, additional = false) => {
     if (!file) return;
     if (file.size > MAX_CLIP_BYTES) { setError('Video 20 GB se bada hai. Chhota clip upload karein.'); return; }
     const controller = new AbortController();
@@ -79,10 +107,16 @@ export default function App() {
     setUploadPercent(0);
     setUploadSeconds(0);
     void run(async () => {
-      const result = await api.upload(file, 'ATM-01', '', setUploadPercent, controller.signal);
+      const result = await api.upload(file, additional ? extraCamera : 'ATM-01', '', setUploadPercent, controller.signal);
       setClips((items) => [result, ...items]);
-      update({ clipId: result.id, analysisId: '', selectedId: '', reviewed: false, uncertain: false });
-      go(3);
+      if (additional) {
+        setExtraTime('');
+        setExtraAnalysis(null);
+        update({ extraClipId: result.id, extraAnalysisId: '' });
+      } else {
+        update({ clipId: result.id, analysisId: '', selectedId: '', reviewed: false, uncertain: false, extraClipId: '', extraAnalysisId: '' });
+        go(3);
+      }
     }).finally(() => { setUploading(false); uploadController.current = null; });
   };
   const scan = () => void run(async () => {
@@ -92,6 +126,22 @@ export default function App() {
     const result = await api.analyze({ clip_id: clip.id, transaction_time: draft.transactionTime, time_mode: draft.timeMode, clip_start_time: draft.clipStart, transaction_ref: '', case_ref: draft.caseNumber, window_seconds: draft.windowSeconds });
     update({ analysisId: result.id, selectedId: '', uncertain: false, reviewed: false, step: 5 }); setAnalysis(null);
   });
+  const extraClip = clips.find((item) => item.id === draft.extraClipId && item.id !== draft.clipId);
+  const activeExtraAnalysis = extraAnalysis?.id === draft.extraAnalysisId ? extraAnalysis : null;
+  const scanningExtra = Boolean(draft.extraAnalysisId && (!activeExtraAnalysis || activeExtraAnalysis.status === 'queued' || activeExtraAnalysis.status === 'running'));
+  const scanExtra = (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!extraClip || busy || scanningExtra) return;
+    void run(async () => {
+      const result = await api.analyze({
+        clip_id: extraClip.id, transaction_time: extraTime, time_mode: 'clip',
+        clip_start_time: '', transaction_ref: '', case_ref: draft.caseNumber, window_seconds: draft.windowSeconds,
+      });
+      update({ extraAnalysisId: result.id });
+      setExtraAnalysis(null);
+    });
+  };
+
   const confirm = (candidate?: Candidate) => void run(async () => {
     if (candidate) { await api.review(candidate.id, 'selected', draft.note); update({ selectedId: candidate.id, uncertain: false, reviewed: true }); }
     else { if (analysis) await api.recordFootageObservation(analysis.id, { time: analysis.transactionOffsetSeconds || 0, visibility: 'unavailable', note: draft.note || 'Officer could not confirm a transaction person.', incidentId: '' }); update({ selectedId: '', uncertain: true, reviewed: true }); }
@@ -171,7 +221,46 @@ export default function App() {
       <figure className="face"><img src={selected.imageUrl} alt="Original selected face crop" /><figcaption>Original · {selected.timeLabel}</figcaption></figure>
       <figure className="face"><img src={selected.enhancedUrl} alt="Enhanced face crop for review" /><figcaption>Enhanced · review ke liye</figcaption></figure>
     </div>}<p>Quality score aur dikkat ek saath dekhein. Officer ka choice: {draft.uncertain ? 'Pakka nahi' : `Person ${selected?.trackId || ''}`}.</p>{candidates.length ? <div className="frame-list">{candidates.slice(0, 8).map((item) => <div className="frame-row" key={item.id}><img src={item.imageUrl} alt={`Face frame at ${item.timeLabel}`} /><div><strong>{item.timeLabel}</strong><span>Quality {Math.round(item.score)}/100</span><small>{item.flags.length ? item.flags.join(', ') : 'Koi quality warning nahi'}</small></div></div>)}</div> : <div className="notice">Koi face frame nahi mila. Report mein yeh baat likhi jayegi.</div>}<button className="primary" onClick={search}>Dusri clips mein dekhein →</button><Back onClick={() => go(6)} /></section>}
-    {draft.step === 8 && <section className="task"><h1>Dusri clips mein dekhein</h1><p>Milta-julta chehra ek lead hai. Identity ka proof nahi.</p>{draft.uncertain ? <div className="notice">Person confirm nahi hua, isliye face search skip kiya gaya.</div> : busy ? <p>Search chal rahi hai…</p> : matches.length ? <div className="frame-list">{matches.slice(0, 8).map((item) => <div className="frame-row" key={item.id}><img src={item.imageUrl} alt="Possible match frame" /><div><strong>Possible match</strong><span>{item.filename}</span><small>{Math.round(item.similarity)}% milta-julta · {item.timeLabel}</small></div></div>)}</div> : <div className="notice">Abhi koi possible match nahi mila. Dusri clip upload karke phir search kar sakte hain.</div>}<button className="primary" onClick={() => go(9)}>Evidence sheet par jaayein →</button><Back onClick={() => go(7)} /></section>}
+    {draft.step === 8 && <section className="task"><h1>Dusri clips mein dekhein</h1><p>Milta-julta chehra ek lead hai. Identity ka proof nahi.</p>{draft.uncertain ? <div className="notice">Person confirm nahi hua, isliye face search skip kiya gaya.</div> : busy ? <p>Search chal rahi hai…</p> : matches.length ? <div className="frame-list">{matches.slice(0, 8).map((item) => <div className="frame-row" key={item.id}><img src={item.imageUrl} alt="Possible match frame" /><div><strong>Possible match</strong><span>{item.filename}</span><small>{Math.round(item.similarity)}% milta-julta · {item.timeLabel}</small></div></div>)}</div> : <div className="notice">Abhi koi possible match nahi mila.</div>}<div className="guided-extra-clip">
+      <h2>Dusri CCTV clip jodein</h2>
+      <label>Camera channel<select value={extraCamera} onChange={(event) => setExtraCamera(event.target.value)} disabled={busy}>
+        {['ATM-01', 'ATM-02', 'ATM-03', 'ATM-04'].map((channel) => <option key={channel}>{channel}</option>)}
+      </select></label>
+      <label>Nayi clip upload karein<input type="file" accept="video/*,.dav,.h264,.264,.asf,.ts,.m4v,.vob" disabled={busy}
+        onChange={(event) => { upload(event.target.files?.[0], true); event.target.value = ''; }} /></label>
+      {uploading && <div role="status">
+        <p>{uploadPercent < 100 ? `Upload ${uploadPercent}%` : 'Video check ho raha hai…'}</p>
+        <button type="button" className="secondary" onClick={() => uploadController.current?.abort()}>Wait rok dein</button>
+      </div>}
+      <label>Ya uploaded clip chunein<select value={extraClip?.id || ''} disabled={busy}
+        onChange={(event) => { update({ extraClipId: event.target.value, extraAnalysisId: '' }); setExtraTime(''); setExtraAnalysis(null); }}>
+        <option value="">Clip chunein</option>
+        {clips.filter((item) => item.id !== draft.clipId).map((item) => <option key={item.id} value={item.id}>{item.filename}</option>)}
+      </select></label>
+      {extraClip && <form onSubmit={scanExtra}>
+        <label>Dusri clip mein person ka video time (HH:MM:SS)
+          <input required placeholder="00:02:15" pattern="[0-9]{2}:[0-5][0-9]:[0-5][0-9]" value={extraTime} onChange={(event) => setExtraTime(event.target.value)} />
+        </label>
+        <button className="secondary" type="submit" disabled={busy || scanningExtra}>Dusri clip scan karein</button>
+      </form>}
+      {scanningExtra && !error && <p role="status">Dusri clip scan ho rahi hai…</p>}
+      {activeExtraAnalysis?.status === 'failed' && <p role="alert">{activeExtraAnalysis.error || 'Clip scan nahi ho saki.'}</p>}
+      {activeExtraAnalysis?.status === 'completed' && <p role="status">
+        {activeExtraAnalysis.candidates.some((crop) => crop.trackId > 0) ? 'Scan poori hui. Neeche face crops compare karein.' : 'Is time window mein tracked face crop nahi mila. Dusra video time try karein.'}
+      </p>}
+      {selected && <button className="secondary" type="button" disabled={busy} onClick={() => void run(async () => {
+        const result = await api.search(selected.id);
+        setMatches(result.matches);
+      })}>Matches phir search karein</button>}
+    </div>
+    <div className="guided-extra-clip">
+      {analysis && selected && selected.trackId > 0
+        ? <CrossCameraFaceReview key={selected.id + ':' + (draft.extraAnalysisId || '') + ':' + (activeExtraAnalysis?.status || '')}
+          analyses={[{ ...analysis, candidates: candidates.filter((crop) => crop.trackId === selected.trackId) }, ...(activeExtraAnalysis ? [activeExtraAnalysis] : [])]}
+          initialCandidateId={selected.id} />
+        : <><h2>Cross-camera face enhancement</h2><p>Pehli clip mein tracked face chunein, phir dusri clip scan karein.</p></>}
+    </div>
+    <button className="primary" onClick={() => go(9)}>Evidence sheet par jaayein →</button><Back onClick={() => go(7)} /></section>}
     {draft.step === 9 && <section className="task"><h1>Evidence sheet</h1><p>Download se pehle officer ka review check karein.</p><div className="summary"><div><span>Case</span><strong>{draft.caseNumber}</strong></div><div><span>ATM ID</span><strong>{draft.atmId}</strong></div><div><span>Video</span><strong>{clip?.filename || 'Missing'}</strong></div><div><span>Officer ka choice</span><strong>{draft.uncertain ? 'Pakka nahi' : selected ? `Person ${selected.trackId}` : 'Pending'}</strong></div></div><div className="notice">Yeh generated sheet local review record hai. Officer ko source video aur facts alag se verify karne honge.</div>{draft.reviewed && analysis?.status === 'completed' ? <a className="primary download" href={`/api/evidence/${analysis.id}.pdf`} download>Evidence sheet download karein ↓</a> : <p className="error">Officer review poora hone ke baad download milega.</p>}<Back onClick={() => go(8)} /></section>}
   </main></div>{inspectedCandidate && <FrameInspector candidate={inspectedCandidate} clip={clips.find((item) => item.id === inspectedCandidate.clipId)} onClose={() => setInspectedCandidate(null)} />}{helpOpen && <div className="help-overlay" role="dialog" aria-modal="true" aria-label="Help and FAQ"><div className="help-dialog"><button className="help-close" onClick={() => setHelpOpen(false)} aria-label="Close help">×</button><h2>Madad chahiye?</h2><p>Har screen par sirf ek kaam karein. Pichhe jaane se saved case nahi mitta.</p><details><summary>DVR video nahi chal raha?</summary><p>DVR software mein MP4 (H.264) export karke phir upload karein. Original file apne paas rakhein.</p></details><details><summary>Bank aur CCTV time alag hain?</summary><p>Transaction screen par “Bank ka time” chunein aur CCTV video ka start time bhi dein.</p></details><details><summary>Chehra saaf nahi hai?</summary><p>“Pakka nahi” chunein. Galat identity confirm karne ki zaroorat nahi hai.</p></details><details><summary>Match ka matlab kya hai?</summary><p>“Possible match” sirf ek lead hai. Officer ko original videos khud dekhne honge.</p></details></div></div>}</div>;
 }

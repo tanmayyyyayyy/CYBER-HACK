@@ -120,3 +120,37 @@
 .inspector-controls>p{margin:0;font-size:.78rem;line-height:1.45}
 @media(max-width:800px){.inspector-layout{grid-template-columns:1fr}.inspector-controls{border-left:0;border-top:1px solid #d6e0e6}.inspector-reference{display:none}.inspector-stage{height:52dvh}}
 @media(max-width:600px){.person-review-row{grid-template-columns:1fr}.person-review-choice img{width:112px;height:112px}.person-review-open{width:100%}.inspector-backdrop{padding:0}.inspector-dialog{max-height:100dvh;height:100dvh;border-radius:0}.inspector-header{padding:16px}.inspector-header h2{font-size:1.25rem}.inspector-main{padding:12px}.inspector-stage{height:48dvh}.inspector-toolbar{flex-wrap:wrap}.inspector-marker-toggle{margin-left:0}}
+
+.guided-extra-clip {
+  display: grid;
+  gap: 12px;
+  margin: 24px 0;
+}
+.guided-extra-clip > label,
+.guided-extra-clip form label {
+  display: grid;
+  gap: 6px;
+}
+.guided-extra-clip form {
+  display: grid;
+  gap: 10px;
+}
+.guided-extra-clip .cross-camera-crops {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(115px, 1fr));
+  gap: 10px;
+  margin: 10px 0;
+}
+.guided-extra-clip figure { margin: 0; }
+.guided-extra-clip .cross-camera-crops img {
+  display: block;
+  width: 100%;
+  height: 100px;
+  object-fit: contain;
+}
+.guided-extra-clip .cross-camera-crops figcaption { overflow-wrap: anywhere; }
+.guided-extra-clip .cross-camera-result img {
+  display: block;
+  width: min(100%, 260px);
+  height: auto;
+}
