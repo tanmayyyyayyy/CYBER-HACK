@@ -4,6 +4,7 @@ dist/
 backend/data/
 models/*.pt
 models/*.onnx
+models/*.part*
 __pycache__/
 *.py[cod]
 .DS_Store

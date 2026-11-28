@@ -5,6 +5,7 @@ import argparse
 import ssl
 import hashlib
 import urllib.request
+import uuid
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -34,6 +35,11 @@ ADVANCED_ASSETS = {
                         "c6fa93dd1ee4a2c18c900a45c1d864a1c6f7aba75d84f91648a30b7fb641d212"),
 }
 
+FALLBACK_URLS = {
+    "face_recognition_sface_2021dec.onnx":
+        "https://huggingface.co/opencv/opencv_zoo/resolve/main/models/face_recognition_sface/face_recognition_sface_2021dec.onnx",
+}
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Download checksum-pinned local model weights.")
@@ -49,26 +55,38 @@ def main() -> int:
                 print(f"verified  {name} ({target.stat().st_size:,} bytes)")
                 continue
             print(f"checksum mismatch for {name}; replacing the local copy", file=sys.stderr)
-        print(f"downloading {name} from its upstream project")
-        temporary = target.with_suffix(target.suffix + ".part")
-        try:
-            import certifi
-            request = urllib.request.Request(url, headers={"User-Agent": "Drishti-Local-Prototype/0.1"})
-            context = ssl.create_default_context(cafile=certifi.where())
-            with urllib.request.urlopen(request, timeout=45, context=context) as response, temporary.open("wb") as output:
-                while chunk := response.read(1024 * 1024):
-                    output.write(chunk)
-            if temporary.stat().st_size < minimum_size:
-                raise RuntimeError("download was smaller than the expected model size")
-            digest = hashlib.sha256(temporary.read_bytes()).hexdigest()
-            if digest != expected_sha256:
-                raise RuntimeError(f"SHA-256 mismatch: received {digest}")
-            temporary.replace(target)
-            print(f"ready  {name} ({target.stat().st_size:,} bytes)")
-        except Exception as exc:
-            temporary.unlink(missing_ok=True)
-            print(f"failed {name}: {exc}", file=sys.stderr)
-            return 1
+        sources = [url]
+        if name in FALLBACK_URLS:
+            sources.append(FALLBACK_URLS[name])
+        for attempt, source in enumerate(sources, start=1):
+            print(f"downloading {name} from official source {attempt}/{len(sources)}", flush=True)
+            temporary = MODELS / f"{name}.part-{uuid.uuid4().hex}"
+            try:
+                import certifi
+                request = urllib.request.Request(source, headers={"User-Agent": "Drishti-Local-Prototype/0.1"})
+                context = ssl.create_default_context(cafile=certifi.where())
+                digest = hashlib.sha256()
+                size = 0
+                with urllib.request.urlopen(request, timeout=45, context=context) as response, temporary.open("wb") as output:
+                    while chunk := response.read(1024 * 1024):
+                        output.write(chunk)
+                        digest.update(chunk)
+                        size += len(chunk)
+                if size < minimum_size:
+                    raise RuntimeError("download was smaller than the expected model size")
+                if digest.hexdigest() != expected_sha256:
+                    raise RuntimeError(f"SHA-256 mismatch: received {digest.hexdigest()}")
+                temporary.replace(target)
+                print(f"ready  {name} ({target.stat().st_size:,} bytes)")
+                break
+            except Exception as exc:
+                try:
+                    temporary.unlink(missing_ok=True)
+                except OSError:
+                    pass  # Another Windows process may briefly hold a downloaded file.
+                print(f"source {attempt} failed for {name}: {exc}", file=sys.stderr)
+                if attempt == len(sources):
+                    return 1
     return 0
 
 
