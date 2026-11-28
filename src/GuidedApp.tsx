@@ -88,5 +88,3 @@ export default function App() {
   </main></div></div>;
 }
 function Back({ onClick }: { onClick: () => void }) { return <button className="back" onClick={onClick}>← Pichhe jaayein</button>; }
-
-
