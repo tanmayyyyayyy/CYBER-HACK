@@ -11,3 +11,7 @@ __pycache__/
 .DS_Store
 .env
 models/training/
+big_data/
+datasets/
+runs/robbery/
+scripts/train_robbery_yolo.py
