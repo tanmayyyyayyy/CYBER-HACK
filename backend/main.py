@@ -6,6 +6,7 @@ import csv
 import hashlib
 import hmac
 import io
+import logging
 from importlib.util import find_spec
 import json
 import mimetypes
@@ -957,11 +958,6 @@ async def upload_clip(request: Request, filename: str, camera_id: str = "ATM-01"
     content_length = request.headers.get("content-length")
     if content_length and content_length.isdigit() and int(content_length) > MAX_UPLOAD_BYTES:
         raise HTTPException(413, "Video 20 GB se bada hai. Chhota clip upload karein.")
-    if replace_clip_id:
-        try:
-            delete_clip(replace_clip_id)
-        except HTTPException:
-            pass
     clip_id = uuid.uuid4().hex
     path = store.UPLOADS / f"{clip_id}{suffix}"
     size = 0
@@ -1019,12 +1015,20 @@ async def upload_clip(request: Request, filename: str, camera_id: str = "ATM-01"
                 f"Local clip uploaded: {original[:100]} ({size} bytes, SHA-256 {source_digest[:16]}…)",
                 now(),
             )
-        return _public_clip(record)
     except Exception:
         path.unlink(missing_ok=True)
         normalized_path = store.UPLOADS / f"{clip_id}-normalized.mp4"
         normalized_path.unlink(missing_ok=True)
         raise
+    if replace_clip_id:
+        try:
+            await run_in_threadpool(delete_clip, replace_clip_id)
+        except HTTPException as exc:
+            if exc.status_code != 404:
+                logging.getLogger(__name__).exception("Could not retire replaced clip %s", replace_clip_id)
+        except (OSError, sqlite3.Error):
+            logging.getLogger(__name__).exception("Could not retire replaced clip %s", replace_clip_id)
+    return _public_clip(record)
 
 
 class FaceFusionRequest(BaseModel):

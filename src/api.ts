@@ -350,7 +350,9 @@ function uploadRequest(file: File, cameraId: string, replaceClipId: string, onPr
     const path = `/api/clips?filename=${encodeURIComponent(file.name)}&camera_id=${encodeURIComponent(cameraId)}${replaceClipId ? `&replace_clip_id=${encodeURIComponent(replaceClipId)}` : ''}`;
     xhr.open('POST', path);
     xhr.withCredentials = true;
-    xhr.timeout = 15 * 60 * 1000;
+    // Budget for transfer at 10 Mbit/s and for server-side video preparation.
+    const transferTimeoutMs = Math.ceil(file.size / 1_250_000) * 1000;
+    xhr.timeout = transferTimeoutMs + 20 * 60 * 1000;
     xhr.setRequestHeader('Content-Type', 'application/octet-stream');
     if (csrfToken) xhr.setRequestHeader('X-CSRF-Token', csrfToken);
     xhr.upload.onprogress = (event) => { if (event.lengthComputable && event.total) onProgress?.(Math.round(event.loaded / event.total * 100)); };

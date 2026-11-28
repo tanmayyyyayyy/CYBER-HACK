@@ -12,7 +12,7 @@ import {
 } from 'lucide-react';
 import {
   api, Analysis, AuditIntegrity, AuditItem, AuthUser, CameraSlot, Candidate, CaseDossier, CaseJourney, Clip,
-  DatabaseBackup, EventItem, FaceVisibility, formatBytes, formatDuration, Health, JournalRow,
+  DatabaseBackup, EventItem, FaceVisibility, formatBytes, formatDuration, Health, JournalRow, MAX_CLIP_BYTES,
   LiveEvidenceResponse, LiveEvidenceSubject, LiveIncident, ReportsData, SecurityOverview, StreamDetection, StreamsResponse, WatchlistEntry,
 } from './api';
 
@@ -163,7 +163,7 @@ function Workspace({ user, onSignOut }: { user: AuthUser; onSignOut: () => Promi
     const file = event.target.files?.[0];
     event.target.value = '';
     if (!file) return;
-    if (file.size > 500 * 1024 * 1024) {
+    if (file.size > MAX_CLIP_BYTES) {
       setToast({ kind: 'error', message: 'This clip is larger than 20 GB. Export a shorter transaction window and retry.' });
       return;
     }
