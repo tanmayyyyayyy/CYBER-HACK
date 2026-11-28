@@ -1,5 +1,6 @@
 param(
   [switch]$Setup,
+  [string]$PythonVersion,
   [switch]$DownloadModels,
   [switch]$PrepareDemo,
   [switch]$Check,
@@ -25,33 +26,26 @@ function Has-Command([string]$name) { return [bool](Get-Command $name -ErrorActi
 Write-Host 'Drishti Tool startup' -ForegroundColor Cyan
 Write-Host "Project: $root"
 
-if (Has-Command 'py.exe') {
-  $systemPython = 'py.exe'
-  $pythonArgs = @('-3')
-} elseif (Has-Command 'python.exe') {
-  $systemPython = 'python.exe'
-  $pythonArgs = @()
-} else {
-  Fail 'Python 3.11+ nahi mila. Python install karein aur terminal dobara kholein.'
-}
 if (-not (Has-Command 'node.exe') -or -not (Has-Command 'npm.cmd')) {
   Fail 'Node.js aur npm nahi mile. Node.js 18+ install karein.'
 }
-$pythonVersion = & $systemPython @pythonArgs -c 'import sys; print("%d.%d" % sys.version_info[:2]); sys.exit(0 if sys.version_info >= (3,11) else 1)'
-if ($LASTEXITCODE -ne 0) { Fail "Python $pythonVersion mila; 3.11+ chahiye." }
-$nodeVersion = (& node.exe -p 'process.versions.node.split(".")[0]').Trim()
-if ([int]$nodeVersion -lt 18) { Fail "Node.js $nodeVersion mila; 18+ chahiye." }
-Write-Host "Python $pythonVersion | Node $(node.exe --version)" -ForegroundColor Green
+$nodeVersion = (& node.exe --version).Trim()
+if ($LASTEXITCODE -ne 0 -or $nodeVersion -notmatch '^v(\d+)\.' -or [int]$Matches[1] -lt 18) {
+  Fail "Node.js $nodeVersion mila; 18+ chahiye."
+}
+Write-Host "Node $nodeVersion" -ForegroundColor Green
 
 if ($Setup) {
-  if (-not (Test-Path -LiteralPath $venvPython)) {
-    Run 'Python environment bana rahe hain' { & $systemPython @pythonArgs -m venv .venv }
-  }
-  Run 'Python packages install ho rahe hain' { & $venvPython -m pip install -r requirements.txt }
+  Run 'Python environment aur packages setup ho rahe hain' { & (Join-Path $root 'setup-venv.ps1') -PythonVersion $PythonVersion }
   Run 'Website packages install ho rahe hain' { & npm.cmd ci }
 }
 
-if (-not (Test-Path -LiteralPath $venvPython)) { Fail 'Python setup missing. .\start-tool.ps1 -Setup chalayein.' }
+if (-not (Test-Path -LiteralPath $venvPython)) { Fail 'Python setup missing. .\start-tool.ps1 -Setup ya .\setup-venv.ps1 chalayein.' }
+$pythonVersion = & $venvPython -c 'import sys; print(sys.version_info.major, sys.version_info.minor)'
+if ($LASTEXITCODE -ne 0 -or $pythonVersion -notmatch '^3 (\d+)$' -or [int]$Matches[1] -lt 11) {
+  Fail 'Existing .venv Python 3.11+ nahi hai. .\setup-venv.ps1 -Recreate chalayein.'
+}
+Write-Host "Environment Python $($pythonVersion -replace ' ', '.')" -ForegroundColor Green
 if (-not (Test-Path -LiteralPath (Join-Path $root 'node_modules\vite'))) { Fail 'Website packages missing. .\start-tool.ps1 -Setup chalayein.' }
 if (-not (Has-Command 'ffmpeg.exe') -or -not (Has-Command 'ffprobe.exe')) {
   Write-Host 'Note: FFmpeg/FFprobe nahi mile. DVR conversion aur kuch video checks kaam nahi karenge.' -ForegroundColor Yellow
