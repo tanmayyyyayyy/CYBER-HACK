@@ -53,6 +53,7 @@ export type Candidate = {
   reviewStatus: 'unreviewed' | 'selected' | 'rejected';
   note: string;
   imageUrl: string;
+  frameUrl: string;
   enhancedUrl: string;
   redactedFrameUrl: string;
 };
@@ -62,6 +63,8 @@ export type AnalysisAlert = {
   severity: string;
   message: string;
 };
+
+export type FaceEnhancement = { imageUrl: string; sources: Candidate[]; fused: boolean };
 
 export type FaceVisibility = 'visible' | 'covered' | 'unavailable';
 export type FootageObservation = {
@@ -372,6 +375,11 @@ function uploadRequest(file: File, cameraId: string, replaceClipId: string, onPr
 }
 
 export const api = {
+  enhanceFaces: (candidateIds: string[]) => request<FaceEnhancement>('/face-enhancement', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ candidate_ids: candidateIds, same_person_confirmed: true }),
+  }),
   authBootstrap: () => request<{ needsAdministrator: boolean; authenticated?: boolean }>('/auth/bootstrap'),
   authMe: async () => { const result = await request<{ user: AuthUser; csrfToken: string }>('/auth/me'); setCsrfToken(result.csrfToken); return result; },
   authLogin: async (email: string, password: string) => { const result = await request<{ user: AuthUser; csrfToken: string }>('/auth/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email, password }) }); setCsrfToken(result.csrfToken); return result; },

@@ -8,7 +8,7 @@ The website opens with a simple Hinglish path: **Login → Naya case → Video u
 .\start-tool.ps1 -Setup
 ```
 
-Later runs use `.\start-tool.ps1`. Open `http://127.0.0.1:5175`. The first run prepares the Python environment, website packages, and local models. If ports are busy, the launcher shows their process names and asks before stopping them. See [the guided setup and current limits](README-GUIDED.md) for details.
+Later runs use `.\start-tool.ps1`. Open `http://127.0.0.1:5175`. The first run prepares the Python environment, website packages, and local models. Keep the startup terminal open: code changes refresh the UI and reload Python services automatically. If ports are busy, the launcher shows their process names and asks before stopping them. See [the guided setup and current limits](README-GUIDED.md) for details.
 
 The detailed capabilities below describe the retained advanced tools and backend.
 

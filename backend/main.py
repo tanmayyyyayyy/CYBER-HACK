@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import contextvars
 import csv
 import hashlib
@@ -36,6 +37,7 @@ from reportlab.lib.utils import ImageReader
 from reportlab.pdfgen import canvas
 
 from backend import analysis, auth, blockchain, forensics, store, streams
+from backend.face_enhancement import enhance
 from backend.security import encrypt_snapshot, sign_manifest, verify_manifest
 from security_portal import router as security_portal_router
 
@@ -271,6 +273,7 @@ def _public_candidate(row: dict) -> dict:
         "reviewStatus": row["review_status"],
         "note": row["note"],
         "imageUrl": f"/api/candidates/{row['id']}/image",
+        "frameUrl": f"/api/candidates/{row['id']}/frame",
         "enhancedUrl": f"/api/candidates/{row['id']}/enhanced",
         "redactedFrameUrl": f"/api/candidates/{row['id']}/frame-redacted",
     }
@@ -1024,6 +1027,59 @@ async def upload_clip(request: Request, filename: str, camera_id: str = "ATM-01"
         raise
 
 
+class FaceFusionRequest(BaseModel):
+    candidate_ids: list[str] = Field(min_length=2, max_length=12)
+    same_person_confirmed: bool
+
+
+@app.post("/api/face-enhancement")
+def enhance_confirmed_faces(payload: FaceFusionRequest) -> JSONResponse:
+    ids = payload.candidate_ids
+    if not payload.same_person_confirmed or len(set(ids)) != len(ids):
+        raise HTTPException(400, "Confirm distinct frames of the same person before combining them.")
+    placeholders = ",".join("?" for _ in ids)
+    with store.connect() as db:
+        rows = db.execute(
+            f"""SELECT c.* FROM candidates c JOIN analyses a ON a.id = c.analysis_id
+                WHERE a.status = 'completed' AND c.id IN ({placeholders})
+                ORDER BY c.score DESC, c.id""",
+            ids,
+        ).fetchall()
+    if len(rows) != len(ids):
+        raise HTTPException(404, "One or more face crops are unavailable.")
+    if len({row["clip_id"] for row in rows}) < 2:
+        raise HTTPException(400, "Select confirmed face crops from at least two clips.")
+    if any(row["track_id"] <= 0 for row in rows):
+        raise HTTPException(400, "Use face crops assigned to a detected person track.")
+    tracks = {}
+    for row in rows:
+        tracks.setdefault(row["clip_id"], set()).add((row["analysis_id"], row["track_id"]))
+    if any(len(track_ids) > 1 for track_ids in tracks.values()):
+        raise HTTPException(400, "Choose one person track per clip.")
+    crops = [cv2.imread(row["image_path"]) for row in rows]
+    if any(crop is None for crop in crops):
+        raise HTTPException(409, "One or more source crops could not be opened.")
+    image, used = enhance(crops)
+    if len({rows[index]["clip_id"] for index in used}) < 2:
+        image, used = crops[0], [0]
+    ok, encoded = cv2.imencode(".png", image)
+    if not ok:
+        raise HTTPException(500, "The review image could not be encoded.")
+    image_bytes = encoded.tobytes()
+    accepted = [_public_candidate(dict(rows[index])) for index in used]
+    with store.connect() as db:
+        store.append_audit(db, "faces.enhancement_reviewed", uuid.uuid4().hex, json.dumps({
+            "confirmedCandidateIds": ids,
+            "usedCandidateIds": [candidate["id"] for candidate in accepted],
+            "outputSha256": hashlib.sha256(image_bytes).hexdigest(),
+        }), now())
+    return JSONResponse({
+        "imageUrl": "data:image/png;base64," + base64.b64encode(image_bytes).decode("ascii"),
+        "sources": accepted,
+        "fused": len(used) > 1,
+    }, headers={"Cache-Control": "private, no-store"})
+
+
 @app.get("/api/clips/{clip_id}/video")
 def clip_video(clip_id: str) -> FileResponse:
     clip = _clip_or_404(clip_id)
@@ -1284,6 +1340,31 @@ def candidate_image(candidate_id: str) -> FileResponse:
         candidate["image_path"],
         media_type="image/jpeg",
         headers={"X-Content-Type-Options": "nosniff", "Cache-Control": "private, no-store"},
+    )
+
+
+@app.get("/api/candidates/{candidate_id}/frame")
+def candidate_frame(candidate_id: str) -> StreamingResponse:
+    """Show the unedited full video frame behind a candidate face crop."""
+    candidate = _candidate_or_404(candidate_id)
+    clip = _clip_or_404(candidate["clip_id"])
+    cap = cv2.VideoCapture(str(clip["path"]))
+    if not cap.isOpened():
+        raise HTTPException(422, "Could not open this video for full-frame review.")
+    try:
+        cap.set(cv2.CAP_PROP_POS_MSEC, max(0.0, float(candidate["frame_seconds"])) * 1000)
+        ok, frame = cap.read()
+        if not ok or frame is None:
+            raise HTTPException(422, "Could not show this moment in the video.")
+        encoded, jpeg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 92])
+        if not encoded:
+            raise HTTPException(500, "Could not prepare the full frame.")
+    finally:
+        cap.release()
+    return StreamingResponse(
+        io.BytesIO(jpeg.tobytes()),
+        media_type="image/jpeg",
+        headers={"Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff"},
     )
 
 
