@@ -39,17 +39,20 @@ export default function CrossCameraFaceReview({ analyses, initialCandidateId }: 
       <p>Analyze a time window in each uploaded clip. Compare the detected tracks and select up to 12 face crops from at least two clips.</p>
       {sources.map((item) => (
         <details key={item.id}>
-          <summary>{item.clipName} � {item.transactionTime} � {item.caseRef || 'Unassigned case'}</summary>
+          <summary title={item.clipName}>
+            <span className="cross-camera-source-name">{item.clipName}</span>
+            <small>{item.transactionTime} · {item.candidates.length} face crops</small>
+          </summary>
           <div className="cross-camera-crops">
             {item.candidates.filter((crop) => crop.trackId > 0).map((crop) => {
               const checked = ids.includes(crop.id);
               const otherTrack = selected.some((other) => other.clipId === crop.clipId &&
                 (other.trackId !== crop.trackId || other.analysisId !== crop.analysisId));
               return (
-                <label key={crop.id}>
+                <label key={crop.id} className="cross-camera-crop" data-selected={checked}>
                   <img src={crop.imageUrl} alt={`Track ${crop.trackId} at ${crop.timeLabel}`} loading="lazy" />
                   <span><input type="checkbox" checked={checked} onChange={() => toggle(crop)}
-                    disabled={busy || (!checked && (otherTrack || selected.length >= 12))} /> Track {crop.trackId} � {crop.timeLabel}</span>
+                    disabled={busy || (!checked && (otherTrack || selected.length >= 12))} /> Track {crop.trackId} · {crop.timeLabel}</span>
                 </label>
               );
             })}
@@ -60,23 +63,23 @@ export default function CrossCameraFaceReview({ analyses, initialCandidateId }: 
       {selected.length > 0 && (
         <div className="cross-camera-crops">
           {selected.map((crop) => (
-            <figure key={crop.id}>
+            <figure key={crop.id} className="cross-camera-selected">
               <img src={crop.imageUrl} alt={`Selected track ${crop.trackId}`} />
               <figcaption>
-                <a href={`/api/clips/${crop.clipId}/video#t=${crop.time}`} target="_blank" rel="noreferrer">
-                  {sources.find((item) => item.id === crop.analysisId)?.clipName} � {crop.timeLabel}
+                <a href={`/api/clips/${crop.clipId}/video#t=${crop.time}`} target="_blank" rel="noreferrer" title={sources.find((item) => item.id === crop.analysisId)?.clipName}>
+                  Video dekhein · {crop.timeLabel}
                 </a>
               </figcaption>
             </figure>
           ))}
         </div>
       )}
-      <label>
+      <label className="cross-camera-confirm">
         <input type="checkbox" checked={confirmed && ready} disabled={!ready || busy}
           onChange={(event) => setConfirmed(event.target.checked)} /> I confirm these frames show the same person.
       </label>
       <div>
-        <button className="button button-compact" type="button" disabled={!ready || !confirmed || busy}
+        <button className="button button-compact cross-camera-action" type="button" disabled={!ready || !confirmed || busy}
           onClick={() => void combine()}>{busy ? 'Aligning frames.' : 'Enhance confirmed frames'}</button>
       </div>
       {error && <p role="alert">{error}</p>}
@@ -84,9 +87,9 @@ export default function CrossCameraFaceReview({ analyses, initialCandidateId }: 
         <figure className="cross-camera-result">
           <img src={result.imageUrl} alt={result.fused ? 'Multi-camera enhanced crop' : 'Best original face crop'} />
           <figcaption>
-            {result.fused ? 'Enhanced review image' : 'Best original crop � insufficient cross-camera alignment'}
+            {result.fused ? 'Enhanced review image' : 'Best original crop · insufficient cross-camera alignment'}
             <ul>{result.sources.map((source) => (
-              <li key={source.id}>{sources.find((item) => item.id === source.analysisId)?.clipName} � {source.timeLabel} � Track {source.trackId}</li>
+              <li key={source.id}>{sources.find((item) => item.id === source.analysisId)?.clipName} · {source.timeLabel} · Track {source.trackId}</li>
             ))}</ul>
           </figcaption>
         </figure>
