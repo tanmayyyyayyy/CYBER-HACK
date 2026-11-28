@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import LoginHeadline from './LoginHeadline';
 import { api, MAX_CLIP_BYTES, type Analysis, type AuthUser, type Candidate, type Clip, formatDuration, formatBytes } from './api';
 import FrameInspector from './FrameInspector';
 import '@fontsource/noto-sans/400.css';
@@ -71,7 +72,7 @@ export default function App() {
   }); };
   const upload = (file: File | undefined) => {
     if (!file) return;
-    if (file.size > MAX_CLIP_BYTES) { setError('Video 500 MB se bada hai. Chhota clip upload karein.'); return; }
+    if (file.size > MAX_CLIP_BYTES) { setError('Video 20 GB se bada hai. Chhota clip upload karein.'); return; }
     const controller = new AbortController();
     uploadController.current = controller;
     setUploading(true);
@@ -102,7 +103,7 @@ export default function App() {
   if (!user) return <main className="auth-layout">
     <div className="auth-brand">
       <img src="/assets/drishti-logo-original.png" alt="Drishti Digital Forensics" />
-      <h1>Investigation yahan se shuru hoti hai.</h1>
+      <LoginHeadline />
       <p>ATM video ko step by step dekhein aur apni jaanch record karein.</p>
     </div>
     <div className="auth-box">
@@ -136,7 +137,7 @@ export default function App() {
       <label className="upload-zone">
         <span className="upload-symbol">↑</span>
         <strong>{uploading ? uploadPercent < 100 ? `Video upload ho raha hai: ${uploadPercent}%` : 'Video check ho raha hai…' : 'Video file yahan chunein'}</strong>
-        <small>MP4, AVI, MOV, MKV ya DVR export. Max 500 MB.</small>
+        <small>MP4, AVI, MOV, MKV ya DVR export. Max 20 GB.</small>
         <input type="file" accept="video/*,.dav,.h264,.264,.asf,.ts,.m4v,.vob" disabled={busy} onChange={(e) => { upload(e.target.files?.[0]); e.currentTarget.value = ''; }} />
       </label>
       {uploading && <div className="upload-progress" role="status">
@@ -166,7 +167,10 @@ export default function App() {
       <div className="actions person-review-actions"><button className="secondary" disabled={busy} onClick={() => confirm()}>Pakka nahi</button><button className="primary" disabled={busy || !selected} onClick={() => confirm(selected)}>Is person ko chunein →</button></div>
       <Back onClick={() => go(5)} />
     </section>}
-    {draft.step === 7 && <section className="task"><h1>Best frames dekhein</h1><p>Quality score aur dikkat ek saath dekhein. Officer ka choice: {draft.uncertain ? 'Pakka nahi' : `Person ${selected?.trackId || ''}`}.</p>{candidates.length ? <div className="frame-list">{candidates.slice(0, 8).map((item) => <div className="frame-row" key={item.id}><img src={item.imageUrl} alt={`Face frame at ${item.timeLabel}`} /><div><strong>{item.timeLabel}</strong><span>Quality {Math.round(item.score)}/100</span><small>{item.flags.length ? item.flags.join(', ') : 'Koi quality warning nahi'}</small></div></div>)}</div> : <div className="notice">Koi face frame nahi mila. Report mein yeh baat likhi jayegi.</div>}<button className="primary" onClick={search}>Dusri clips mein dekhein →</button><Back onClick={() => go(6)} /></section>}
+    {draft.step === 7 && <section className="task"><h1>Best frames dekhein</h1>{selected && !draft.uncertain && <div className="face-grid">
+      <figure className="face"><img src={selected.imageUrl} alt="Original selected face crop" /><figcaption>Original · {selected.timeLabel}</figcaption></figure>
+      <figure className="face"><img src={selected.enhancedUrl} alt="Enhanced face crop for review" /><figcaption>Enhanced · review ke liye</figcaption></figure>
+    </div>}<p>Quality score aur dikkat ek saath dekhein. Officer ka choice: {draft.uncertain ? 'Pakka nahi' : `Person ${selected?.trackId || ''}`}.</p>{candidates.length ? <div className="frame-list">{candidates.slice(0, 8).map((item) => <div className="frame-row" key={item.id}><img src={item.imageUrl} alt={`Face frame at ${item.timeLabel}`} /><div><strong>{item.timeLabel}</strong><span>Quality {Math.round(item.score)}/100</span><small>{item.flags.length ? item.flags.join(', ') : 'Koi quality warning nahi'}</small></div></div>)}</div> : <div className="notice">Koi face frame nahi mila. Report mein yeh baat likhi jayegi.</div>}<button className="primary" onClick={search}>Dusri clips mein dekhein →</button><Back onClick={() => go(6)} /></section>}
     {draft.step === 8 && <section className="task"><h1>Dusri clips mein dekhein</h1><p>Milta-julta chehra ek lead hai. Identity ka proof nahi.</p>{draft.uncertain ? <div className="notice">Person confirm nahi hua, isliye face search skip kiya gaya.</div> : busy ? <p>Search chal rahi hai…</p> : matches.length ? <div className="frame-list">{matches.slice(0, 8).map((item) => <div className="frame-row" key={item.id}><img src={item.imageUrl} alt="Possible match frame" /><div><strong>Possible match</strong><span>{item.filename}</span><small>{Math.round(item.similarity)}% milta-julta · {item.timeLabel}</small></div></div>)}</div> : <div className="notice">Abhi koi possible match nahi mila. Dusri clip upload karke phir search kar sakte hain.</div>}<button className="primary" onClick={() => go(9)}>Evidence sheet par jaayein →</button><Back onClick={() => go(7)} /></section>}
     {draft.step === 9 && <section className="task"><h1>Evidence sheet</h1><p>Download se pehle officer ka review check karein.</p><div className="summary"><div><span>Case</span><strong>{draft.caseNumber}</strong></div><div><span>ATM ID</span><strong>{draft.atmId}</strong></div><div><span>Video</span><strong>{clip?.filename || 'Missing'}</strong></div><div><span>Officer ka choice</span><strong>{draft.uncertain ? 'Pakka nahi' : selected ? `Person ${selected.trackId}` : 'Pending'}</strong></div></div><div className="notice">Yeh generated sheet local review record hai. Officer ko source video aur facts alag se verify karne honge.</div>{draft.reviewed && analysis?.status === 'completed' ? <a className="primary download" href={`/api/evidence/${analysis.id}.pdf`} download>Evidence sheet download karein ↓</a> : <p className="error">Officer review poora hone ke baad download milega.</p>}<Back onClick={() => go(8)} /></section>}
   </main></div>{inspectedCandidate && <FrameInspector candidate={inspectedCandidate} clip={clips.find((item) => item.id === inspectedCandidate.clipId)} onClose={() => setInspectedCandidate(null)} />}{helpOpen && <div className="help-overlay" role="dialog" aria-modal="true" aria-label="Help and FAQ"><div className="help-dialog"><button className="help-close" onClick={() => setHelpOpen(false)} aria-label="Close help">×</button><h2>Madad chahiye?</h2><p>Har screen par sirf ek kaam karein. Pichhe jaane se saved case nahi mitta.</p><details><summary>DVR video nahi chal raha?</summary><p>DVR software mein MP4 (H.264) export karke phir upload karein. Original file apne paas rakhein.</p></details><details><summary>Bank aur CCTV time alag hain?</summary><p>Transaction screen par “Bank ka time” chunein aur CCTV video ka start time bhi dein.</p></details><details><summary>Chehra saaf nahi hai?</summary><p>“Pakka nahi” chunein. Galat identity confirm karne ki zaroorat nahi hai.</p></details><details><summary>Match ka matlab kya hai?</summary><p>“Possible match” sirf ek lead hai. Officer ko original videos khud dekhne honge.</p></details></div></div>}</div>;

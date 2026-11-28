@@ -146,7 +146,7 @@ def check_frame_continuity(path: Path, max_samples: int = 48) -> dict[str, Any]:
     }
 
 
-def enhance_face_crop(face_bgr: np.ndarray, label: bool = True) -> np.ndarray:
+def enhance_face_crop(face_bgr: np.ndarray, label: bool = True, fused: bool = False) -> np.ndarray:
     """
     Deterministic, non-hallucinating forensic contrast/sharpness enhancement.
     Always clearly labelled so reviewers never mistake it for raw evidence.
@@ -172,7 +172,7 @@ def enhance_face_crop(face_bgr: np.ndarray, label: bool = True) -> np.ndarray:
     canvas[:sharpened.shape[0], :] = sharpened
     cv2.putText(
         canvas,
-        "ENHANCED (CLAHE+SHARPEN 2X) - REVIEW AID ONLY",
+        "MULTI-FRAME - REVIEW ONLY" if fused else "ENHANCED - REVIEW ONLY",
         (6, sharpened.shape[0] + 17),
         cv2.FONT_HERSHEY_SIMPLEX,
         0.36,

@@ -363,9 +363,10 @@ def run_analysis(analysis_id: str) -> None:
         if not cap.isOpened():
             raise ValueError("OpenCV could not decode this clip. Try exporting it as MP4/H.264.")
         fps = float(clip["fps"]) or 25.0
-        step = max(1, int(fps * SAMPLE_EVERY_SECONDS))
-        cap.set(cv2.CAP_PROP_POS_MSEC, start * 1000)
-        frame_index = int(start * fps)
+        interval = 0.35 if end - start <= 120 else SAMPLE_EVERY_SECONDS
+        step = max(1, round(fps * interval))
+        frame_index = math.ceil(start * fps)
+        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
         sampled = 0
         next_track = 1
         previous: dict[int, tuple[int, int, int, int]] = {}
@@ -386,16 +387,16 @@ def run_analysis(analysis_id: str) -> None:
         byte_tracker = None
         tracking_engine = "OpenCV person detector + IoU"
 
-        while sampled < MAX_SAMPLED_FRAMES:
+        while sampled < MAX_SAMPLED_FRAMES and frame_index / fps <= end:
             ok, frame = cap.read()
             if not ok:
                 break
             seconds = frame_index / fps
-            if seconds > end:
-                break
             frame_index += step
             sampled += 1
-            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
+            for _ in range(step - 1):
+                if not cap.grab():
+                    break
 
             boxes = advanced_vision.person_boxes(frame)
             if boxes is None:
@@ -474,11 +475,13 @@ def run_analysis(analysis_id: str) -> None:
                     if at_terminal:
                         score = min(100.0, round(score + 4.0, 1))
                     descriptor, embedding_type = _extract_embedding(roi, face_row, face)
+                    landmarks = face_row[4:14].reshape(5, 2) - (max(0, fx), max(0, fy))
+                    metrics["landmarks"] = landmarks.tolist()
                     image_name = f"{uuid.uuid4().hex}.jpg"
                     image_path = store.CANDIDATES / image_name
                     cv2.imwrite(str(image_path), face, [cv2.IMWRITE_JPEG_QUALITY, 93])
                     candidate_id = str(uuid.uuid4())
-                    abs_bbox = [x1 + max(0, fx), y1 + max(0, fy), x1 + max(0, fx) + fw, y1 + max(0, fy) + fh]
+                    abs_bbox = [x1 + max(0, fx), y1 + max(0, fy), x1 + min(roi.shape[1], fx + fw), y1 + min(roi.shape[0], fy + fh)]
                     found.append(
                         {
                             "id": candidate_id,
@@ -507,7 +510,7 @@ def run_analysis(analysis_id: str) -> None:
 
             for candidate in found:
                 prior = next(
-                    (c for c in candidates if c["track_id"] == candidate["track_id"] and candidate["time"] - c["time"] < 1.5),
+                    (c for c in candidates if candidate["track_id"] != 0 and c["track_id"] == candidate["track_id"] and candidate["time"] - c["time"] < 1.5),
                     None,
                 )
                 if prior is None:
@@ -656,3 +659,66 @@ def run_analysis(analysis_id: str) -> None:
         for path in store.CANDIDATES.glob("*.jpg"):
             if path.name not in referenced:
                 path.unlink(missing_ok=True)
+
+
+def fuse_candidate_frames(candidate: dict, reference: np.ndarray) -> tuple[np.ndarray, list[str]]:
+    """Blend compatible crops into the selected crop without inventing detail."""
+    sources = [candidate["id"]]
+    descriptor = np.asarray(store.json_load(candidate.get("descriptor_json"), []))
+    if not candidate["track_id"] or descriptor.shape != (128,):
+        return reference, sources
+
+    with store.connect() as db:
+        result = db.execute("SELECT result_json FROM analyses WHERE id=?", (candidate["analysis_id"],)).fetchone()
+        rows = db.execute(
+            """SELECT * FROM candidates WHERE analysis_id=? AND track_id=? AND id<>?
+               AND ABS(frame_seconds - ?) BETWEEN 0.1 AND 8
+               ORDER BY score DESC, frame_seconds, id LIMIT 8""",
+            (candidate["analysis_id"], candidate["track_id"], candidate["id"], candidate["frame_seconds"]),
+        ).fetchall()
+    details = store.json_load(result["result_json"], {}) if result else {}
+    landmarks = {
+        item["id"]: np.asarray(item["metrics"].get("landmarks", []), dtype=np.float32)
+        for item in (details or {}).get("candidates", [])
+    }
+    target = landmarks.get(candidate["id"])
+    if target is None or target.shape != (5, 2):
+        return reference, sources
+
+    height, width = reference.shape[:2]
+    eye_distance = float(np.linalg.norm(target[0] - target[1]))
+    if eye_distance < 10:
+        return reference, sources
+    total = reference.astype(np.float32)
+    weights = np.ones((height, width, 1), dtype=np.float32)
+    gray_reference = cv2.cvtColor(reference, cv2.COLOR_BGR2GRAY).astype(np.float32)
+
+    for row in rows:
+        points = landmarks.get(row["id"])
+        other_descriptor = np.asarray(store.json_load(row["descriptor_json"], []))
+        if points is None or points.shape != (5, 2) or other_descriptor.shape != (128,):
+            continue
+        norm = np.linalg.norm(descriptor) * np.linalg.norm(other_descriptor)
+        if norm <= 0 or float(descriptor @ other_descriptor / norm) < 0.65:
+            continue
+        if any(flag in store.json_load(row["flags_json"], []) for flag in ("possible mask", "possible helmet", "partial face")):
+            continue
+        matrix, _ = cv2.estimateAffinePartial2D(points, target, method=cv2.LMEDS)
+        if matrix is None or np.max(np.linalg.norm(cv2.transform(points[None], matrix)[0] - target, axis=1)) > eye_distance * 0.10:
+            continue
+        image = cv2.imread(row["image_path"])
+        if image is None:
+            continue
+        aligned = cv2.warpAffine(image, matrix, (width, height))
+        valid = cv2.warpAffine(np.ones(image.shape[:2], np.float32), matrix, (width, height)) > 0.99
+        difference = np.abs(cv2.cvtColor(aligned, cv2.COLOR_BGR2GRAY).astype(np.float32) - gray_reference)
+        agreement = valid & (difference < 28)
+        if np.mean(agreement) < 0.60:
+            continue
+        weight = (agreement * 0.25).astype(np.float32)[..., None]
+        total += aligned * weight
+        weights += weight
+        sources.append(row["id"])
+        if len(sources) == 4:
+            break
+    return np.rint(total / weights).astype(np.uint8), sources

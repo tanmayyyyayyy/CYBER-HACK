@@ -164,7 +164,7 @@ function Workspace({ user, onSignOut }: { user: AuthUser; onSignOut: () => Promi
     event.target.value = '';
     if (!file) return;
     if (file.size > 500 * 1024 * 1024) {
-      setToast({ kind: 'error', message: 'This clip is larger than 500 MB. Export a shorter transaction window and retry.' });
+      setToast({ kind: 'error', message: 'This clip is larger than 20 GB. Export a shorter transaction window and retry.' });
       return;
     }
     try {
