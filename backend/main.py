@@ -25,6 +25,7 @@ from urllib.parse import quote
 
 import cv2
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -43,7 +44,7 @@ ALLOWED_EXTENSIONS = {
     ".mp4", ".avi", ".mov", ".mkv", ".wmv", ".flv", ".mpeg", ".mpg",
     ".dav", ".h264", ".264", ".ts", ".m4v", ".asf", ".vob",
 }
-MAX_UPLOAD_BYTES = 500 * 1024 * 1024
+MAX_UPLOAD_BYTES = 500_000_000
 LOCAL_ORIGINS = ["http://127.0.0.1:5174", "http://localhost:5174"]
 
 analysis_pool: ThreadPoolExecutor | None = None
@@ -179,6 +180,21 @@ def _transcode_review_copy(source: Path, target: Path, ffmpeg: str) -> None:
         ) from exc
 
 
+def _remux_review_copy(source: Path, target: Path, ffmpeg: str) -> bool:
+    """Move an existing H.264 video stream to MP4 without re-encoding frames."""
+    try:
+        subprocess.run(
+            [ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
+             "-protocol_whitelist", "file,pipe", "-i", str(source), "-map", "0:v:0",
+             "-an", "-sn", "-dn", "-c:v", "copy", "-movflags", "+faststart", str(target)],
+            capture_output=True, timeout=180, check=True,
+        )
+        return True
+    except (subprocess.SubprocessError, OSError):
+        target.unlink(missing_ok=True)
+        return False
+
+
 def _prepare_clip_media(path: Path, normalized: Path, suffix: str) -> tuple[Path, dict, bool, str]:
     """Probe uploaded clip and normalize non-browser/raw codecs into MP4 for reliable analysis and preview."""
     proprietary_msg = forensics.detect_proprietary_dvr(path)
@@ -199,7 +215,8 @@ def _prepare_clip_media(path: Path, normalized: Path, suffix: str) -> tuple[Path
         suffix_name == ".webm" and codec_name in {"vp80", "vp90", "vp09", "av01"}
     )
     if not browser_codec and ffmpeg:
-        _transcode_review_copy(path, normalized, ffmpeg)
+        if codec_name not in {"h264", "avc1", "x264"} or not _remux_review_copy(path, normalized, ffmpeg):
+            _transcode_review_copy(path, normalized, ffmpeg)
         playback_info = _inspect_video(normalized)
         if playback_info is None:
             raise HTTPException(422, proprietary_msg or "The converted playback copy could not be decoded.")
@@ -934,6 +951,9 @@ async def upload_clip(request: Request, filename: str, camera_id: str = "ATM-01"
         raise HTTPException(422, "Choose one of the four local ATM camera channels.")
     if suffix not in ALLOWED_EXTENSIONS:
         raise HTTPException(415, "Use MP4, AVI, MOV, MKV, WMV, FLV, MPEG, MPG, or compatible DAV/H264/TS DVR exports.")
+    content_length = request.headers.get("content-length")
+    if content_length and content_length.isdigit() and int(content_length) > MAX_UPLOAD_BYTES:
+        raise HTTPException(413, "Video 500 MB se bada hai. 500 MB se chhota clip upload karein.")
     if replace_clip_id:
         try:
             delete_clip(replace_clip_id)
@@ -947,21 +967,21 @@ async def upload_clip(request: Request, filename: str, camera_id: str = "ATM-01"
             async for chunk in request.stream():
                 size += len(chunk)
                 if size > MAX_UPLOAD_BYTES:
-                    raise HTTPException(413, "Maximum clip size is 500 MB.")
+                    raise HTTPException(413, "Video 500 MB se bada hai. 500 MB se chhota clip upload karein.")
                 output.write(chunk)
         if size == 0:
             raise HTTPException(400, "The uploaded clip is empty.")
         # Reuse shared ingest probe/normalization pipeline without extra copy
-        source_digest = _file_sha256(path)
+        source_digest = await run_in_threadpool(_file_sha256, path)
         normalized = store.UPLOADS / f"{clip_id}-normalized.mp4"
-        playable_path, source_info, preview_ready, playback_codec = _prepare_clip_media(path, normalized, suffix)
+        playable_path, source_info, preview_ready, playback_codec = await run_in_threadpool(_prepare_clip_media, path, normalized, suffix)
 
         width, height = source_info["width"], source_info["height"]
         fps, duration, codec = source_info["fps"], source_info["duration"], source_info["codec"]
-        analysis_digest = _file_sha256(playable_path)
+        analysis_digest = await run_in_threadpool(_file_sha256, playable_path)
         forensics_payload = {
-            "container": forensics.probe_video_container(path),
-            "continuity": forensics.check_frame_continuity(playable_path),
+            "container": await run_in_threadpool(forensics.probe_video_container, path),
+            "continuity": await run_in_threadpool(forensics.check_frame_continuity, playable_path),
         }
         record = {
             "id": clip_id,
