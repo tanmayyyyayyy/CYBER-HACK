@@ -35,9 +35,9 @@ Alongside the primary PS04 clip-forensic workflow, Drishti includes a sandboxed 
 - **Supported Formats:** `MP4`, `AVI`, `MOV`, `MKV`, `WMV`, `FLV`, `MPEG`/`MPG`, plus DVR/NVR exports (`H264`, `264`, `DAV`, `ASF`, `TS`, `M4V`, `VOB`).
 - **Safe Normalization & Validation:** Probes streams with `ffprobe`, validates codecs/resolution/FPS/duration, normalizes non-browser codecs locally via FFmpeg (`-protocol_whitelist file,pipe`), and checks frame continuity / luminance splice cues. Vendor conversion guidance for unsupported formats is served at `/api/dvr-guidance`.
 
-### 3. Person Tracking, YuNet Face Extraction & SFace 128-D Embeddings ([`backend/analysis.py`](backend/analysis.py))
-- **Lightweight Person-Only Tracking:** Uses OpenCV Zoo **MediaPipe** person detection (`person_detection_mediapipe_2023mar.onnx`, with HOG fallback) and IoU tracking under thread-safe locks (`_person_infer_lock`). Vehicle, ANPR, and border-fence detectors are excluded.
-- **Face Detection & Quality Scoring:** Samples frames at `0.75s` intervals (up to `1,600` frames) inside the transaction window using **YuNet** (`face_detection_yunet_2023mar.onnx`), ranking frames by sharpness, illumination, face size, pose angle, and terminal proximity.
+### 3. Person Tracking, SCRFD Face Detection & SFace 128-D Embeddings ([`backend/analysis.py`](backend/analysis.py))
+- **Lightweight Person-Only Tracking:** Uses OpenCV Zoo **MediaPipe** person detection (`person_detection_mediapipe_2023mar.onnx`, with HOG fallback) and ByteTrack, with IoU tracking available as a fallback. Vehicle, ANPR, and border-fence detectors are excluded.
+- **Face Detection & Quality Scoring:** Samples frames inside the transaction window using **InsightFace SCRFD-10GF** (`det_10g.onnx`), with YuNet available when the SCRFD weights are absent, ranking frames by sharpness, illumination, face size, pose angle, and terminal proximity.
 - **Reliability & Behaviour Flags:** Flags `possible mask`, `possible cap / headgear`, `possible helmet`, `partial face`, `soft focus`, `low light`, `overexposed`, `turned face`, `small face`, `low resolution`, and `low face confidence`, plus advisory **shoulder-surfing** (multi-person zone occupancy) and **card-slot / keypad tampering** cues.
 - **Cross-Clip Face Search (`Face search` / `/api/search`):** Uses normalized **SFace** 128-D embeddings (`face_recognition_sface_2021dec.onnx` under `_sface_infer_lock`) for cosine-similarity search across other clips in the vault.
 
@@ -160,7 +160,7 @@ See [LICENSES.md](LICENSES.md) and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.
 CYBER-HACK/
 ├── backend/
 │   ├── main.py          # FastAPI lifespan API, RBAC/CSRF middleware, EJ matcher, PDF/BSA63/Bundle ZIP exports
-│   ├── analysis.py      # MediaPipe person tracking, YuNet faces, SFace 128-D embeddings, quality/occlusion flags
+│   ├── analysis.py      # MediaPipe and ByteTrack, SCRFD faces, SFace 128-D embeddings, quality/occlusion flags
 │   ├── forensics.py     # ffprobe metadata, FFmpeg DVR normalization, splice cues, CLAHE enhancement, DPDP blur
 │   ├── streams.py       # 4-stream local/IP-Webcam/RTSP monitor, DB evidence & repeat alerts, incident snapshots
 │   ├── store.py         # SQLite WAL persistence, migrations, audit chain, dossier, watchlist & live evidence
@@ -210,21 +210,19 @@ To test Drishti against realistic Rajasthan Police Hackathon 2026 (PS04) test ca
 
 Open a completed analysis and use **Face visibility and case handoff**. New analyses report sampled frames with a detected person and no face detection. Use the source player to review a timestamp, save a visibility observation, and optionally link an incident from the same camera channel. The signed manifest records the transaction offset, observation timestamp, and operator account. **Case bundle with original footage** includes the original bytes after a SHA-256 check and any linked snapshots that still match their recorded fingerprints. Earlier analyses can accept observations. Rerun them to collect visibility sampling counts.
 
-## Optional YOLOv8 and ByteTrack monitoring
+## Vision setup and monitoring
 
-The default OpenCV Zoo models remain available. To enable the optional Ultralytics models on Windows, run these commands from the project folder. Review the [Ultralytics license](https://www.ultralytics.com/license) before distributing an integration that uses its software or weights.
+The setup scripts install local face, person, tracking and pose dependencies. To update an existing Windows environment, run these commands from the project folder. The InsightFace weights are provided for non-commercial research. Review the [Ultralytics license](https://www.ultralytics.com/license) before distributing an integration that uses its software or weights.
 
 ```powershell
-.\.venv\Scripts\python.exe -m pip install -r requirements-vision.txt
-.\.venv\Scripts\python.exe scripts/download_models.py --advanced-vision
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt -r requirements-vision.txt
+.\.venv\Scripts\python.exe scripts/download_models.py --insightface --advanced-vision
 $env:DRISHTI_ADVANCED_VISION = '1'
-npm.cmd run build
-npm.cmd run blockchain:demo
 ```
 
-YOLOv8n detects people and ByteTrack keeps a separate tracking session for each camera or clip. YuNet and SFace still handle face evidence. On the live wall, ATM-zone dwell generates a review alert after 90 seconds by default. A recorded feed uses clip time for the timer. Dwell and welfare observations stay in the local alert log.
+MediaPipe detects people and ByteTrack maintains a separate tracking session for each camera or clip. SCRFD detects faces and SFace handles cross-clip comparison. On the live wall, ATM-zone dwell generates a review alert after 90 seconds by default. A recorded feed uses clip time for the timer. Dwell and welfare observations stay in the local alert log.
 
-To enable YOLOv8n-Pose welfare cues, set a guard zone for the installed camera and restart. This example shows the configuration format. Adjust each rectangle to the actual camera view. Coordinates are normalized `[left, top, right, bottom]`.
+To enable YOLO11n-pose welfare cues, set a guard zone for the installed camera and restart. This example shows the configuration format. Adjust each rectangle to the actual camera view. Coordinates are normalized `[left, top, right, bottom]`.
 
 ```powershell
 $env:DRISHTI_CAMERA_ZONES = '{"CAM-03":{"atm":[0.22,0.16,0.84,0.94],"guard":[0.02,0.15,0.20,0.95],"dwellSeconds":90,"welfareSeconds":30}}'

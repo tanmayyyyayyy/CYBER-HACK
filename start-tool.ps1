@@ -52,7 +52,7 @@ if (-not (Has-Command 'ffmpeg.exe') -or -not (Has-Command 'ffprobe.exe')) {
   Write-Host 'Note: FFmpeg/FFprobe nahi mile. DVR conversion aur kuch video checks kaam nahi karenge.' -ForegroundColor Yellow
 }
 if ($Setup -or $DownloadModels) {
-  Run 'AI models download/check ho rahe hain' { & $venvPython scripts/download_models.py }
+  Run 'AI models download/check ho rahe hain' { & $venvPython scripts/download_models.py --insightface --advanced-vision }
 }
 if ($PrepareDemo) {
   Run 'Demo video prepare ho raha hai' { & $venvPython scripts/prepare_demo_feeds.py }

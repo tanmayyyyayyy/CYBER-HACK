@@ -463,6 +463,7 @@ class StreamState:
     latest_face_monotonic: float = 0.0
     dropout_reported: bool = False
     byte_tracker: Any = None
+    tracker_initialized: bool = False
     tracker_label: str = "IoU"
     zone_dwell: advanced_vision.ZoneDwell = field(default_factory=advanced_vision.ZoneDwell)
     welfare_start: float | None = None
@@ -480,7 +481,7 @@ class LocalSurveillanceManager:
     """
     4-stream surveillance manager inspired by God's Eye View's source/health
     registry and SIH MultiCameraManager — runs MediaPipe person detection,
-    YuNet face + occlusion analysis, and SFace 128-D live watchlist matching
+    face detection and occlusion analysis, and SFace 128-D live watchlist matching
     on raw unannotated frames before rendering clean HUD overlays.
     """
 
@@ -968,28 +969,19 @@ class LocalSurveillanceManager:
 
         if detect:
             # 1) Run person detector on CLEAN raw frame (never on overlay graphics!)
-            raw_boxes = advanced_vision.person_boxes(raw)
-            if raw_boxes is None:
-                raw_boxes = analysis.detect_person_boxes(raw)
-                min_confidence = .60
-                state.byte_tracker = None
-                state.tracker_label = "OpenCV person detector + IoU"
-            else:
-                min_confidence = .10
-                state.tracker_label = "YOLOv8n + IoU"
-                if state.byte_tracker is None:
-                    state.byte_tracker = advanced_vision.new_tracker()
-                if state.byte_tracker is None:
-                    min_confidence = .34
+            raw_boxes = analysis.detect_person_boxes(raw)
+            if not state.tracker_initialized:
+                state.byte_tracker = advanced_vision.new_tracker()
+                state.tracker_initialized = True
+            state.tracker_label = analysis.person_tracking_label(state.byte_tracker)
             filtered_boxes = []
             for x1, y1, x2, y2, conf in raw_boxes:
                 bw, bh = max(0, x2 - x1), max(0, y2 - y1)
-                if conf >= min_confidence and (bw * bh) >= frame_area * 0.022 and bh >= 48 and bw >= 24:
+                if conf >= .60 and (bw * bh) >= frame_area * 0.022 and bh >= 48 and bw >= 24:
                     filtered_boxes.append((x1, y1, x2, y2, conf))
 
             if state.byte_tracker is not None:
                 tracks = advanced_vision.track_people(state.byte_tracker, filtered_boxes, raw)
-                state.tracker_label = "YOLOv8n + ByteTrack"
                 state.previous_boxes = {tid: box[:4] for tid, box in tracks}
             else:
                 tracks, state.previous_boxes, state.next_track_id = analysis.match_tracks(
@@ -1080,7 +1072,7 @@ class LocalSurveillanceManager:
             else:
                 state.tamper_streak = 0
 
-            # 2) Run YuNet face detection on CLEAN raw frame ROIs
+            # 2) Detect faces on clean camera frames.
             detector = self._get_face_detector()
             best_face_crop = None
             best_face_score = -1.0
@@ -1090,25 +1082,22 @@ class LocalSurveillanceManager:
             if detector is not None:
                 search_rois: list[tuple[int, int, np.ndarray]] = []
                 if tracks:
-                    for _, (x1, y1, x2, y2, _) in tracks[:3]:
+                    for _, (x1, y1, x2, y2, _) in tracks:
                         px1, py1 = max(0, x1 - 14), max(0, y1 - 14)
                         px2, py2 = min(w, x2 + 14), min(h, y2 + 14)
                         crop = raw[py1:py2, px1:px2]
                         if crop.size > 0:
                             search_rois.append((px1, py1, crop))
-                elif state.custom_source:
+                else:
                     search_rois.append((0, 0, raw))
 
                 for ox, oy, roi in search_rois:
-                    detector.setInputSize((roi.shape[1], roi.shape[0]))
-                    _, faces = detector.detect(roi)
-                    if faces is None:
-                        continue
+                    faces = analysis.detect_track_faces(detector, roi, bool(tracks))
                     for face_row in faces:
                         fx, fy, fw, fh = map(int, face_row[:4])
                         conf = float(face_row[14])
                         # Reject tiny / low-confidence background texture false hits
-                        if conf < 0.68 or fw < 22 or fh < 22:
+                        if conf < 0.54 or not analysis.usable_face_row(face_row):
                             continue
                         face_img = roi[max(0, fy) : min(roi.shape[0], fy + fh), max(0, fx) : min(roi.shape[1], fx + fw)]
                         if face_img.size == 0:
@@ -1500,6 +1489,7 @@ class LocalSurveillanceManager:
         state.robbery_sample_at = 0.0
         state.latest_face_monotonic = 0.0
         state.byte_tracker = None
+        state.tracker_initialized = False
         state.zone_dwell = advanced_vision.ZoneDwell()
         state.welfare_anchor = None
         state.welfare_track_id = None
@@ -1534,6 +1524,8 @@ class LocalSurveillanceManager:
                         state.source_label = src_label
                         continue
 
+                    if not is_live and analysis.case_scan_active.is_set():
+                        continue
                     src_key = str(src_val)
                     if state.source_path != src_key:
                         self._reset_monitoring(state)

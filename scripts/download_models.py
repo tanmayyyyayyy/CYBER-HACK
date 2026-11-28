@@ -6,6 +6,7 @@ import ssl
 import hashlib
 import urllib.request
 import uuid
+import zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -29,11 +30,20 @@ ASSETS = {
 }
 
 ADVANCED_ASSETS = {
-    "yolov8n.pt": ("https://github.com/ultralytics/assets/releases/download/v8.3.0/yolov8n.pt", 5_000_000,
-                   "f59b3d833e2ff32e194b5bb8e08d211dc7c5bdf144b90d2c8412c47ccfc83b36"),
-    "yolov8n-pose.pt": ("https://github.com/ultralytics/assets/releases/download/v8.3.0/yolov8n-pose.pt", 5_000_000,
-                        "c6fa93dd1ee4a2c18c900a45c1d864a1c6f7aba75d84f91648a30b7fb641d212"),
+    "yolo11n-pose.pt": (
+        "https://github.com/ultralytics/assets/releases/download/v8.3.0/yolo11n-pose.pt",
+        5_000_000,
+        "869e83fcdffdc7371fa4e34cd8e51c838cc729571d1635e5141e3075e9319dc0",
+    ),
 }
+
+SCRFD_NAME = "det_10g.onnx"
+SCRFD_HASH = "5838f7fe053675b1c7a08b633df49e7af5495cee0493c7dcf6697200b85b5b91"
+BUFFALO_ASSET = (
+    "https://github.com/deepinsight/insightface/releases/download/model-zoo/buffalo_l.zip",
+    288_000_000,
+    "80ffe37d8a5940d59a7384c201a2a38d4741f2f3c51eef46ebb28218a7b0ca2f",
+)
 
 FALLBACK_URLS = {
     "face_recognition_sface_2021dec.onnx":
@@ -43,15 +53,19 @@ FALLBACK_URLS = {
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Download checksum-pinned local model weights.")
-    parser.add_argument("--advanced-vision", action="store_true", help="Also download optional Ultralytics YOLOv8 weights.")
+    parser.add_argument("--advanced-vision", action="store_true", help="Also download YOLO11 pose weights.")
+    parser.add_argument("--insightface", action="store_true",
+                        help="Download SCRFD-10GF under InsightFace's non-commercial research model terms.")
     args = parser.parse_args()
     MODELS.mkdir(parents=True, exist_ok=True)
     assets = ASSETS | ADVANCED_ASSETS if args.advanced_vision else ASSETS
+    if args.insightface:
+        assets = assets | {SCRFD_NAME: BUFFALO_ASSET}
     for name, (url, minimum_size, expected_sha256) in assets.items():
         target = MODELS / name
-        if target.is_file() and target.stat().st_size >= minimum_size:
+        if target.is_file():
             digest = hashlib.sha256(target.read_bytes()).hexdigest()
-            if digest == expected_sha256:
+            if digest == (SCRFD_HASH if name == SCRFD_NAME else expected_sha256):
                 print(f"verified  {name} ({target.stat().st_size:,} bytes)")
                 continue
             print(f"checksum mismatch for {name}; replacing the local copy", file=sys.stderr)
@@ -76,6 +90,12 @@ def main() -> int:
                     raise RuntimeError("download was smaller than the expected model size")
                 if digest.hexdigest() != expected_sha256:
                     raise RuntimeError(f"SHA-256 mismatch: received {digest.hexdigest()}")
+                if name == SCRFD_NAME:
+                    with zipfile.ZipFile(temporary) as archive:
+                        detector = archive.read(SCRFD_NAME)
+                    if hashlib.sha256(detector).hexdigest() != SCRFD_HASH:
+                        raise RuntimeError("SCRFD detector checksum mismatch")
+                    temporary.write_bytes(detector)
                 temporary.replace(target)
                 print(f"ready  {name} ({target.stat().st_size:,} bytes)")
                 break

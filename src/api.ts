@@ -64,7 +64,22 @@ export type AnalysisAlert = {
   message: string;
 };
 
-export type FaceEnhancement = { imageUrl: string; sources: Candidate[]; fused: boolean };
+export type FaceEnhancement = {
+  imageUrl: string;
+  sources: Candidate[];
+  sourceFrames?: Pick<Candidate, 'analysisId' | 'clipId' | 'trackId' | 'time' | 'timeLabel'>[];
+  nearbyFusion?: boolean;
+  fused: boolean;
+  quality: {
+    score: number;
+    metrics: Record<string, number> | null;
+    flags: string[];
+  };
+  bestOriginalScore: number;
+  bestOriginal?: Candidate;
+  frameScores: { id: string; score: number }[];
+  fallbackReason: string | null;
+};
 
 export type FaceVisibility = 'visible' | 'covered' | 'unavailable';
 export type FootageObservation = {
@@ -96,6 +111,8 @@ export type Analysis = {
     windowStart?: number;
     windowEnd?: number;
     sampledFrames?: number;
+    progressPercent?: number;
+    scanMode?: 'quick' | 'detailed';
     personFrames?: number;
     personWithoutFaceSamples?: number[];
     trackingEngine?: string;
@@ -377,10 +394,10 @@ function uploadRequest(file: File, cameraId: string, replaceClipId: string, onPr
 }
 
 export const api = {
-  enhanceFaces: (candidateIds: string[]) => request<FaceEnhancement>('/face-enhancement', {
+  enhanceFaces: (candidateIds: string[], singleTrack = false) => request<FaceEnhancement>('/face-enhancement', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ candidate_ids: candidateIds, same_person_confirmed: true }),
+    body: JSON.stringify({ candidate_ids: candidateIds, same_person_confirmed: true, single_track: singleTrack }),
   }),
   authBootstrap: () => request<{ needsAdministrator: boolean; authenticated?: boolean }>('/auth/bootstrap'),
   authMe: async () => { const result = await request<{ user: AuthUser; csrfToken: string }>('/auth/me'); setCsrfToken(result.csrfToken); return result; },
@@ -447,7 +464,7 @@ export const api = {
     notes: string;
   }) => request<CaseDossier>('/dossier', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }),
   caseJourney: () => request<CaseJourney>('/cases/journey'),
-  analyze: (payload: { clip_id: string; transaction_time: string; time_mode: 'clip' | 'absolute'; clip_start_time: string; transaction_ref: string; case_ref?: string; window_seconds: number }) =>
+  analyze: (payload: { clip_id: string; transaction_time: string; time_mode: 'clip' | 'absolute'; clip_start_time: string; transaction_ref: string; case_ref?: string; window_seconds: number; quick_scan?: boolean }) =>
     request<{ id: string; status: string }>('/analyses', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }),
   review: (id: string, status: Candidate['reviewStatus'], note: string) =>
     request(`/candidates/${id}/review`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ status, note }) }),

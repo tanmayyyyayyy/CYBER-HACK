@@ -1,0 +1,26 @@
+/* Match crop sizes so the original and the review composite are easy to compare. */
+.face-result-comparison {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  width: 100%;
+}
+
+.face-result-comparison figure {
+  min-width: 0;
+  margin: 0;
+}
+
+.face-result-comparison figure img {
+  display: block;
+  width: 100%;
+  height: clamp(120px, 23vw, 240px);
+  object-fit: contain;
+  border-radius: 6px;
+  background: #112b43;
+}
+
+.face-result-comparison figure figcaption {
+  font-size: .85rem;
+  margin-top: 4px;
+}

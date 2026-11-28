@@ -1,4 +1,4 @@
-"""Optional YOLOv8 inference and a separate ByteTrack session per camera."""
+"""Optional YOLO pose inference and a separate ByteTrack session per camera."""
 
 import json
 import logging
@@ -15,8 +15,7 @@ import numpy as np
 
 LOG = logging.getLogger(__name__)
 MODELS = Path(__file__).resolve().parents[1] / "models"
-PERSON_WEIGHTS = MODELS / "yolov8n.pt"
-POSE_WEIGHTS = MODELS / "yolov8n-pose.pt"
+POSE_WEIGHTS = MODELS / "yolo11n-pose.pt"
 ROBBERY_WEIGHTS = MODELS / "atm_robbery.pt"
 _inference_lock = threading.Lock()
 _failed_inference: set[Path] = set()
@@ -25,7 +24,7 @@ _failed_inference: set[Path] = set()
 @lru_cache(maxsize=3)
 def _load_model(weights: Path):
     flag = "DRISHTI_ROBBERY_VISION" if weights == ROBBERY_WEIGHTS else "DRISHTI_ADVANCED_VISION"
-    if os.environ.get(flag) != "1" or not weights.is_file():
+    if os.environ.get(flag, "0" if weights == ROBBERY_WEIGHTS else "1") != "1" or not weights.is_file():
         return None
     try:
         import torch
@@ -53,13 +52,6 @@ def _predict(weights, frame, **kwargs):
             return None
 
 
-def person_boxes(frame):
-    result = _predict(PERSON_WEIGHTS, frame, classes=[0], conf=.10, imgsz=640)
-    if result is None:
-        return None
-    return [(*map(int, row[:4]), float(row[4])) for row in result.boxes.data.cpu().numpy()]
-
-
 def robbery_weapon(frame) -> str:
     result = _predict(ROBBERY_WEIGHTS, frame, conf=0.50, imgsz=640)
     if result is None:
@@ -71,7 +63,7 @@ def robbery_weapon(frame) -> str:
 
 
 def new_tracker():
-    if find_spec("lap") is None:
+    if os.environ.get("DRISHTI_ADVANCED_VISION", "1") != "1" or find_spec("lap") is None:
         return None
     try:
         from ultralytics.trackers.byte_tracker import BYTETracker

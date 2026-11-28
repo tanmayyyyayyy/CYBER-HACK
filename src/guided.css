@@ -200,3 +200,32 @@
   height: auto;
   margin-bottom: 8px;
 }
+
+
+.scan-box progress {
+  width: min(360px, 84%);
+  height: 12px;
+  accent-color: #197b72;
+}
+
+.guided-track-picture .track-face-picture {
+  display: grid;
+  justify-items: start;
+  gap: 12px;
+  min-width: 0;
+}
+
+.guided-track-picture .track-face-picture h3,
+.guided-track-picture .track-face-picture p {
+  margin: 0;
+}
+
+.guided-track-picture .cross-camera-result,
+.guided-extra-clip .face-result-comparison {
+  width: 100%;
+}
+
+.guided-extra-clip .face-result-comparison figure img {
+  height: clamp(120px, 23vw, 240px);
+  width: 100%;
+}

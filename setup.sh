@@ -12,8 +12,8 @@ if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
 fi
 
 python3 -m venv .venv
-.venv/bin/python -m pip install -r requirements.txt
+.venv/bin/python -m pip install -r requirements.txt -r requirements-vision.txt
 npm install
-.venv/bin/python scripts/download_models.py
+.venv/bin/python scripts/download_models.py --insightface --advanced-vision
 .venv/bin/python scripts/prepare_demo_feeds.py
 echo "Setup complete. Run ./start.sh"

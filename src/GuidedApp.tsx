@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 import LoginHeadline from './LoginHeadline';
-import { api, MAX_CLIP_BYTES, type Analysis, type AuthUser, type Candidate, type Clip, formatDuration, formatBytes } from './api';
+import { api, MAX_CLIP_BYTES, type Analysis, type AuthUser, type Candidate, type Clip, type FaceEnhancement, formatDuration, formatBytes } from './api';
 import FrameInspector from './FrameInspector';
-import CrossCameraFaceReview from './FaceEnhancement';
+import CrossCameraFaceReview, { TrackFacePicture } from './FaceEnhancement';
 import '@fontsource/noto-sans/400.css';
 import '@fontsource/noto-sans/700.css';
 import '@fontsource/noto-sans-devanagari/400.css';
@@ -10,8 +10,8 @@ import '@fontsource/noto-sans-devanagari/700.css';
 import './guided.css';
 
 const steps = ['Login', 'Naya case', 'Video upload', 'File check', 'Transaction', 'Scan', 'Person chunein', 'Best frames', 'Dusri clips', 'Evidence sheet'];
-type Draft = { step: number; caseNumber: string; atmId: string; clipId: string; analysisId: string; selectedId: string; uncertain: boolean; reviewed: boolean; timeMode: 'clip' | 'absolute'; transactionTime: string; clipStart: string; windowSeconds: number; note: string; extraClipId?: string; extraAnalysisId?: string };
-const fresh: Draft = { step: 1, caseNumber: '', atmId: '', clipId: '', analysisId: '', selectedId: '', uncertain: false, reviewed: false, timeMode: 'clip', transactionTime: '', clipStart: '', windowSeconds: 30, note: '' };
+type Draft = { step: number; caseNumber: string; atmId: string; clipId: string; analysisId: string; selectedId: string; uncertain: boolean; reviewed: boolean; timeMode: 'clip' | 'absolute'; transactionTime: string; clipStart: string; windowSeconds: number; quickScan: boolean; note: string; extraClipId?: string; extraAnalysisId?: string };
+const fresh: Draft = { step: 1, caseNumber: '', atmId: '', clipId: '', analysisId: '', selectedId: '', uncertain: false, reviewed: false, timeMode: 'clip', transactionTime: '', clipStart: '', windowSeconds: 30, quickScan: true, note: '' };
 function savedDraft(): Draft { try { return { ...fresh, ...JSON.parse(localStorage.getItem('drishti-tool-draft') || '{}') }; } catch { return fresh; } }
 function message(error: unknown) { return error instanceof Error && error.name === 'AbortError' ? 'Upload ka wait roka gaya. Server par file check kuch der chal sakta hai.' : error instanceof Error ? error.message : 'Kuch galat hua. Dobara koshish karein.'; }
 
@@ -25,6 +25,7 @@ export default function App() {
   const [extraTime, setExtraTime] = useState('');
   const [extraCamera, setExtraCamera] = useState('ATM-02');
   const [analysis, setAnalysis] = useState<Analysis | null>(null);
+  const [reviewPicture, setReviewPicture] = useState<{ analysisId: string; trackId: number; result: FaceEnhancement } | null>(null);
   const [matches, setMatches] = useState<(Candidate & { similarity: number; filename: string })[]>([]);
   const [inspectedCandidate, setInspectedCandidate] = useState<Candidate | null>(null);
   const [error, setError] = useState('');
@@ -46,6 +47,9 @@ export default function App() {
   const clip = clips.find((item) => item.id === draft.clipId);
   const candidates = analysis?.candidates || [];
   const selected = candidates.find((item) => item.id === draft.selectedId);
+  const trackFrames = selected && selected.trackId > 0 ? candidates.filter(
+    (item) => item.trackId === selected.trackId && item.reviewStatus !== 'rejected',
+  ) : [];
 
   useEffect(() => { localStorage.setItem('drishti-tool-draft', JSON.stringify(draft)); }, [draft]);
   useEffect(() => {
@@ -62,11 +66,27 @@ export default function App() {
   useEffect(() => { if (user) api.clips().then(setClips).catch((err) => setError(message(err))); }, [user]);
   useEffect(() => {
     if (!user || !draft.analysisId) return;
+    const id = draft.analysisId;
     let active = true;
-    const load = () => api.analysis(draft.analysisId).then((result) => { if (active) setAnalysis(result); }).catch((err) => { if (active) setError(message(err)); });
-    void load(); const timer = window.setInterval(() => { if (draft.step === 5 || analysis?.status === 'running') void load(); }, 2500);
-    return () => { active = false; window.clearInterval(timer); };
-  }, [user, draft.analysisId, draft.step, analysis?.status]);
+    let timer: number | undefined;
+    const poll = async () => {
+      try {
+        const result = await api.analysis(id);
+        if (!active) return;
+        setAnalysis(result);
+        if (result.status === 'queued' || result.status === 'running') {
+          timer = window.setTimeout(() => void poll(), 1500);
+        }
+      } catch (err) {
+        if (active) {
+          setError(message(err));
+          timer = window.setTimeout(() => void poll(), 3000);
+        }
+      }
+    };
+    void poll();
+    return () => { active = false; window.clearTimeout(timer); };
+  }, [user, draft.analysisId]);
 
   useEffect(() => {
     if (!user || draft.step !== 8 || !draft.extraAnalysisId) return;
@@ -123,7 +143,7 @@ export default function App() {
     if (!clip) throw new Error('Pehle video chunein.');
     if (!draft.transactionTime) throw new Error('Transaction ka time batayein.');
     if (draft.timeMode === 'absolute' && !draft.clipStart) throw new Error('CCTV video ka shuru hone wala time batayein.');
-    const result = await api.analyze({ clip_id: clip.id, transaction_time: draft.transactionTime, time_mode: draft.timeMode, clip_start_time: draft.clipStart, transaction_ref: '', case_ref: draft.caseNumber, window_seconds: draft.windowSeconds });
+    const result = await api.analyze({ clip_id: clip.id, transaction_time: draft.transactionTime, time_mode: draft.timeMode, clip_start_time: draft.clipStart, transaction_ref: '', case_ref: draft.caseNumber, window_seconds: draft.windowSeconds, quick_scan: draft.quickScan });
     update({ analysisId: result.id, selectedId: '', uncertain: false, reviewed: false, step: 5 }); setAnalysis(null);
   });
   const extraClip = clips.find((item) => item.id === draft.extraClipId && item.id !== draft.clipId);
@@ -135,7 +155,7 @@ export default function App() {
     void run(async () => {
       const result = await api.analyze({
         clip_id: extraClip.id, transaction_time: extraTime, time_mode: 'clip',
-        clip_start_time: '', transaction_ref: '', case_ref: draft.caseNumber, window_seconds: draft.windowSeconds,
+        clip_start_time: '', transaction_ref: '', case_ref: draft.caseNumber, window_seconds: draft.windowSeconds, quick_scan: draft.quickScan,
       });
       update({ extraAnalysisId: result.id });
       setExtraAnalysis(null);
@@ -200,8 +220,30 @@ export default function App() {
       <Back onClick={() => go(1)} />
     </section>}
     {draft.step === 3 && <section className="task"><h1>File theek hai?</h1><p>Video ki jankari check karein. Original file ka record safe rehta hai.</p>{clip ? <><div className="file-preview"><video src={clip.videoUrl} poster={clip.posterUrl} controls preload="metadata" /><div><strong>{clip.filename}</strong><dl><dt>Video format</dt><dd>{clip.codec || 'Unknown'}</dd><dt>Size</dt><dd>{clip.width} × {clip.height}</dd><dt>Duration</dt><dd>{formatDuration(clip.duration)}</dd><dt>File size</dt><dd>{formatBytes(clip.sizeBytes)}</dd></dl></div></div><div className="notice">{clip.normalized ? 'Video ko chalne layak format mein badla gaya hai. Original safe hai.' : clip.previewReady ? 'Video chalne ke liye ready hai.' : 'Preview nahi chal raha. DVR software se MP4 (H.264) export karein, phir dobara upload karein.'}</div><button className="primary" disabled={!clip.previewReady} onClick={() => go(4)}>File sahi hai, aage badhein →</button></> : <p>Video nahi mila. Pichhle step par upload karein.</p>}<Back onClick={() => go(2)} /></section>}
-    {draft.step === 4 && <section className="task"><h1>Transaction ka time batayein</h1><p>Isi time ke aas paas ka video scan hoga.</p><div className="choice-row"><button className={draft.timeMode === 'clip' ? 'chosen' : ''} onClick={() => update({ timeMode: 'clip', transactionTime: '' })}>Video ka time</button><button className={draft.timeMode === 'absolute' ? 'chosen' : ''} onClick={() => update({ timeMode: 'absolute', transactionTime: '' })}>Bank ka time</button></div><div className="fields"><label>{draft.timeMode === 'clip' ? 'Video mein time (HH:MM:SS)' : 'Bank transaction ka time'}<input required type={draft.timeMode === 'clip' ? 'text' : 'datetime-local'} placeholder={draft.timeMode === 'clip' ? '00:02:30' : undefined} pattern={draft.timeMode === 'clip' ? '\\d{2,3}:\\d{2}:\\d{2}' : undefined} value={draft.transactionTime} onChange={(e) => update({ transactionTime: e.target.value })} /></label>{draft.timeMode === 'absolute' && <label>CCTV video kab shuru hua?<input type="datetime-local" value={draft.clipStart} onChange={(e) => update({ clipStart: e.target.value })} /><small>Bank aur CCTV ki ghadi alag ho sakti hai. Dono time dekar sahi jagah dhoondhein.</small></label>}<label>Kitne time tak dekhein?<select value={draft.windowSeconds} onChange={(e) => update({ windowSeconds: Number(e.target.value) })}><option value={15}>15 second dono taraf</option><option value={30}>30 second dono taraf</option><option value={60}>1 minute dono taraf</option><option value={120}>2 minute dono taraf</option><option value={300}>5 minute dono taraf</option></select></label></div><button className="primary" disabled={busy || !draft.transactionTime || draft.timeMode === 'absolute' && !draft.clipStart} onClick={scan}>{busy ? 'Scan shuru ho raha hai…' : 'Video scan karein →'}</button><Back onClick={() => go(3)} /></section>}
-    {draft.step === 5 && <section className="task"><h1>Video scan ho raha hai</h1><p>Logon ko track karke ATM ke aas paas ke frames dekhe ja rahe hain.</p><div className="scan-box"><span className="scan-ring" /><strong>{analysis?.status === 'failed' ? 'Scan poora nahi hua' : analysis?.status === 'completed' ? 'Scan poora hua' : 'Thoda rukiye…'}</strong><span>{analysis?.status === 'completed' ? `${analysis.result.peopleSeen || 0} person track aur ${analysis.candidates.length} face frames mile.` : analysis?.error || 'Analysis isi computer par chal raha hai.'}</span></div>{analysis?.status === 'completed' && <button className="primary" onClick={() => go(6)}>Person dekhein →</button>}{analysis?.status === 'failed' && <button className="secondary" onClick={() => go(4)}>Time badal kar dobara karein</button>}<Back onClick={() => go(4)} /></section>}
+    {draft.step === 4 && <section className="task"><h1>Transaction ka time batayein</h1><p>Isi time ke aas paas ka video scan hoga.</p><div className="choice-row"><button className={draft.timeMode === 'clip' ? 'chosen' : ''} onClick={() => update({ timeMode: 'clip', transactionTime: '' })}>Video ka time</button><button className={draft.timeMode === 'absolute' ? 'chosen' : ''} onClick={() => update({ timeMode: 'absolute', transactionTime: '' })}>Bank ka time</button></div><div className="fields"><label>{draft.timeMode === 'clip' ? 'Video mein time (HH:MM:SS)' : 'Bank transaction ka time'}<input required type={draft.timeMode === 'clip' ? 'text' : 'datetime-local'} placeholder={draft.timeMode === 'clip' ? '00:02:30' : undefined} pattern={draft.timeMode === 'clip' ? '\\d{2,3}:\\d{2}:\\d{2}' : undefined} value={draft.transactionTime} onChange={(e) => update({ transactionTime: e.target.value })} /></label>{draft.timeMode === 'absolute' && <label>CCTV video kab shuru hua?<input type="datetime-local" value={draft.clipStart} onChange={(e) => update({ clipStart: e.target.value })} /><small>Bank aur CCTV ki ghadi alag ho sakti hai. Dono time dekar sahi jagah dhoondhein.</small></label>}<label>Kitne time tak dekhein?<select value={draft.windowSeconds} onChange={(e) => update({ windowSeconds: Number(e.target.value) })}><option value={15}>15 second dono taraf</option><option value={30}>30 second dono taraf</option><option value={60}>1 minute dono taraf</option><option value={120}>2 minute dono taraf</option><option value={300}>5 minute dono taraf</option></select></label>
+      <label>Scan mode<select value={draft.quickScan ? 'quick' : 'detailed'} onChange={(event) => update({ quickScan: event.target.value === 'quick' })}>
+        <option value="quick">Quick scan</option><option value="detailed">Detailed scan</option>
+      </select><small>Quick scan kam frames check karta hai. Chehra kuch pal ke liye dikhe toh Detailed scan chunein.</small></label>
+    </div><button className="primary" disabled={busy || !draft.transactionTime || draft.timeMode === 'absolute' && !draft.clipStart} onClick={scan}>{busy ? 'Scan shuru ho raha hai…' : 'Video scan karein →'}</button><Back onClick={() => go(3)} /></section>}
+    {draft.step === 5 && <section className="task">
+      <h1>{analysis?.status === 'completed' ? 'Video scan poora hua' : analysis?.status === 'failed' ? 'Video scan poora nahi hua' : 'Video scan ho raha hai'}</h1>
+      <p>{draft.quickScan ? 'Quick scan' : 'Detailed scan'} · {draft.transactionTime} ke aas paas ±{draft.windowSeconds} sec.</p>
+      <div className="scan-box" role="status">
+        {analysis?.status === 'completed' ? <strong>{analysis.result.peopleSeen || 0} person tracks · {analysis.candidates.length} face frames</strong>
+          : analysis?.status === 'failed' ? <strong>{analysis.error}</strong>
+          : <>
+            <strong>{analysis?.status === 'queued' ? 'Scan queue mein hai' : 'Frames check ho rahe hain'}</strong>
+            {analysis?.status === 'running' && <><progress aria-label="Scan progress" max={100} value={analysis.result.progressPercent ?? 0} />
+              <span>{analysis.result.progressPercent ?? 0}% · {analysis.result.sampledFrames ?? 0} frames checked</span></>}
+            {analysis?.status === 'queued' && <span>Pichhla scan khatam hote hi yeh scan shuru hoga.</span>}
+          </>}
+      </div>
+      {analysis?.status === 'completed' && <button className="primary" onClick={() => go(6)}>Person dekhein →</button>}
+      {analysis?.status === 'failed' && <button className="secondary" onClick={() => go(4)}>Time badal kar dobara karein</button>}
+      {analysis?.status === 'completed' && analysis.result.scanMode === 'quick' &&
+        <button className="back" onClick={() => { update({ quickScan: false }); go(4); }}>Detailed scan karein</button>}
+      <Back onClick={() => go(4)} />
+    </section>}
     {draft.step === 6 && <section className="task">
       <h1>Transaction wala person kaun ho sakta hai?</h1>
       <p>Face aur poora scene dekhkar khud faisla karein. Sirf photo se identity confirm nahi hoti.</p>
@@ -220,7 +262,12 @@ export default function App() {
     {draft.step === 7 && <section className="task"><h1>Best frames dekhein</h1>{selected && !draft.uncertain && <div className="face-grid">
       <figure className="face"><img src={selected.imageUrl} alt="Original selected face crop" /><figcaption>Original · {selected.timeLabel}</figcaption></figure>
       <figure className="face"><img src={selected.enhancedUrl} alt="Enhanced face crop for review" /><figcaption>Enhanced · review ke liye</figcaption></figure>
-    </div>}<p>Quality score aur dikkat ek saath dekhein. Officer ka choice: {draft.uncertain ? 'Pakka nahi' : `Person ${selected?.trackId || ''}`}.</p>{candidates.length ? <div className="frame-list">{candidates.slice(0, 8).map((item) => <div className="frame-row" key={item.id}><img src={item.imageUrl} alt={`Face frame at ${item.timeLabel}`} /><div><strong>{item.timeLabel}</strong><span>Quality {Math.round(item.score)}/100</span><small>{item.flags.length ? item.flags.join(', ') : 'Koi quality warning nahi'}</small></div></div>)}</div> : <div className="notice">Koi face frame nahi mila. Report mein yeh baat likhi jayegi.</div>}<button className="primary" onClick={search}>Dusri clips mein dekhein →</button><Back onClick={() => go(6)} /></section>}
+    </div>}
+    {analysis && !draft.uncertain && trackFrames.length > 0 && <div className="guided-extra-clip guided-track-picture">
+      <TrackFacePicture key={trackFrames.map((frame) => frame.id).join(',')} analysis={analysis} frames={trackFrames}
+        onResult={(result) => setReviewPicture({ analysisId: analysis.id, trackId: trackFrames[0].trackId, result })} />
+    </div>}
+    <p>Quality score aur dikkat ek saath dekhein. Officer ka choice: {draft.uncertain ? 'Pakka nahi' : `Person ${selected?.trackId || ''}`}.</p>{candidates.length ? <div className="frame-list">{candidates.slice(0, 8).map((item) => <div className="frame-row" key={item.id}><img src={item.imageUrl} alt={`Face frame at ${item.timeLabel}`} /><div><strong>{item.timeLabel}</strong><span>Quality {Math.round(item.score)}/100</span><small>{item.flags.length ? item.flags.join(', ') : 'Koi quality warning nahi'}</small></div></div>)}</div> : <div className="notice">Koi face frame nahi mila. Report mein yeh baat likhi jayegi.</div>}<button className="primary" onClick={search}>Dusri clips mein dekhein →</button><Back onClick={() => go(6)} /></section>}
     {draft.step === 8 && <section className="task"><h1>Dusri clips mein dekhein</h1><p>Milta-julta chehra ek lead hai. Identity ka proof nahi.</p>{draft.uncertain ? <div className="notice">Person confirm nahi hua, isliye face search skip kiya gaya.</div> : busy ? <p>Search chal rahi hai…</p> : matches.length ? <div className="frame-list">{matches.slice(0, 8).map((item) => <div className="frame-row" key={item.id}><img src={item.imageUrl} alt="Possible match frame" /><div><strong>Possible match</strong><span>{item.filename}</span><small>{Math.round(item.similarity)}% milta-julta · {item.timeLabel}</small></div></div>)}</div> : <div className="notice">Abhi koi possible match nahi mila.</div>}<div className="guided-extra-clip">
       <h2>Dusri CCTV clip jodein</h2>
       <label>Camera channel<select value={extraCamera} onChange={(event) => setExtraCamera(event.target.value)} disabled={busy}>
@@ -258,10 +305,12 @@ export default function App() {
         ? <CrossCameraFaceReview key={selected.id + ':' + (draft.extraAnalysisId || '') + ':' + (activeExtraAnalysis?.status || '')}
           analyses={[{ ...analysis, candidates: candidates.filter((crop) => crop.trackId === selected.trackId) }, ...(activeExtraAnalysis ? [activeExtraAnalysis] : [])]}
           initialCandidateId={selected.id} />
-        : <><h2>Cross-camera face enhancement</h2><p>Pehli clip mein tracked face chunein, phir dusri clip scan karein.</p></>}
+        : <><h2>Best face from 4–5 frames</h2><p>Pehli clip mein ek tracked face chunein.</p></>}
     </div>
     <button className="primary" onClick={() => go(9)}>Evidence sheet par jaayein →</button><Back onClick={() => go(7)} /></section>}
-    {draft.step === 9 && <section className="task"><h1>Evidence sheet</h1><p>Download se pehle officer ka review check karein.</p><div className="summary"><div><span>Case</span><strong>{draft.caseNumber}</strong></div><div><span>ATM ID</span><strong>{draft.atmId}</strong></div><div><span>Video</span><strong>{clip?.filename || 'Missing'}</strong></div><div><span>Officer ka choice</span><strong>{draft.uncertain ? 'Pakka nahi' : selected ? `Person ${selected.trackId}` : 'Pending'}</strong></div></div><div className="notice">Yeh generated sheet local review record hai. Officer ko source video aur facts alag se verify karne honge.</div>{draft.reviewed && analysis?.status === 'completed' ? <a className="primary download" href={`/api/evidence/${analysis.id}.pdf`} download>Evidence sheet download karein ↓</a> : <p className="error">Officer review poora hone ke baad download milega.</p>}<Back onClick={() => go(8)} /></section>}
+    {draft.step === 9 && <section className="task"><h1>Evidence sheet</h1><p>Download se pehle officer ka review check karein.</p><div className="summary"><div><span>Case</span><strong>{draft.caseNumber}</strong></div><div><span>ATM ID</span><strong>{draft.atmId}</strong></div><div><span>Video</span><strong>{clip?.filename || 'Missing'}</strong></div><div><span>Officer ka choice</span><strong>{draft.uncertain ? 'Pakka nahi' : selected ? `Person ${selected.trackId}` : 'Pending'}</strong></div></div><div className="notice">Yeh generated sheet local review record hai. Officer ko source video aur facts alag se verify karne honge.</div>{draft.reviewed && analysis?.status === 'completed' ? <a className="primary download" href={`/api/evidence/${analysis.id}.pdf`} download>Evidence sheet download karein ↓</a> : <p className="error">Officer review poora hone ke baad download milega.</p>}{reviewPicture && !draft.uncertain && reviewPicture.analysisId === analysis?.id && reviewPicture.trackId === selected?.trackId &&
+      <div><a className="secondary" href={reviewPicture.result.imageUrl} download="drishti-final-face.png">Review picture PNG download karein</a></div>}
+      <Back onClick={() => go(8)} /></section>}
   </main></div>{inspectedCandidate && <FrameInspector candidate={inspectedCandidate} clip={clips.find((item) => item.id === inspectedCandidate.clipId)} onClose={() => setInspectedCandidate(null)} />}{helpOpen && <div className="help-overlay" role="dialog" aria-modal="true" aria-label="Help and FAQ"><div className="help-dialog"><button className="help-close" onClick={() => setHelpOpen(false)} aria-label="Close help">×</button><h2>Madad chahiye?</h2><p>Har screen par sirf ek kaam karein. Pichhe jaane se saved case nahi mitta.</p><details><summary>DVR video nahi chal raha?</summary><p>DVR software mein MP4 (H.264) export karke phir upload karein. Original file apne paas rakhein.</p></details><details><summary>Bank aur CCTV time alag hain?</summary><p>Transaction screen par “Bank ka time” chunein aur CCTV video ka start time bhi dein.</p></details><details><summary>Chehra saaf nahi hai?</summary><p>“Pakka nahi” chunein. Galat identity confirm karne ki zaroorat nahi hai.</p></details><details><summary>Match ka matlab kya hai?</summary><p>“Possible match” sirf ek lead hai. Officer ko original videos khud dekhne honge.</p></details></div></div>}</div>;
 }
 function Back({ onClick }: { onClick: () => void }) { return <button className="back" onClick={onClick}>← Pichhe jaayein</button>; }

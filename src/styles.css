@@ -965,3 +965,23 @@ code, .hash-code, .mono-data, .topbar-clock strong, .candidate-card-meta, .simil
   height: auto;
   margin-bottom: 8px;
 }
+
+
+.track-face-picture {
+  display: grid;
+  justify-items: start;
+  gap: 8px;
+  padding-block: 16px;
+  border-block-start: 1px solid #dfe5e8;
+}
+
+.track-face-picture h3,
+.track-face-picture p,
+.track-face-picture .cross-camera-result {
+  margin: 0;
+}
+
+.track-face-picture .cross-camera-result figcaption {
+  display: grid;
+  gap: 6px;
+}

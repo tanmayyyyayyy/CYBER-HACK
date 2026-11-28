@@ -165,15 +165,18 @@ def enhance_face_crop(face_bgr: np.ndarray, label: bool = True, fused: bool = Fa
     merged = cv2.cvtColor(cv2.merge([l_enh, a_chan, b_chan]), cv2.COLOR_LAB2BGR)
     blurred = cv2.GaussianBlur(merged, (0, 0), sigmaX=1.2)
     sharpened = cv2.addWeighted(merged, 1.38, blurred, -0.38, 0)
-    if not label:
-        return sharpened
-    banner_h = 26
-    canvas = np.full((sharpened.shape[0] + banner_h, sharpened.shape[1], 3), (17, 43, 67), dtype=np.uint8)
-    canvas[:sharpened.shape[0], :] = sharpened
+    return label_enhanced_crop(sharpened, fused) if label else sharpened
+
+
+def label_enhanced_crop(image: np.ndarray, fused: bool) -> np.ndarray:
+    height, width = image.shape[:2]
+    canvas = np.full((height + 26, max(width, 200), 3), (17, 43, 67), dtype=np.uint8)
+    left = (canvas.shape[1] - width) // 2
+    canvas[:height, left:left + width] = image
     cv2.putText(
         canvas,
         "MULTI-FRAME - REVIEW ONLY" if fused else "ENHANCED - REVIEW ONLY",
-        (6, sharpened.shape[0] + 17),
+        (6, height + 17),
         cv2.FONT_HERSHEY_SIMPLEX,
         0.36,
         (235, 190, 110),
@@ -181,6 +184,33 @@ def enhance_face_crop(face_bgr: np.ndarray, label: bool = True, fused: bool = Fa
         cv2.LINE_AA,
     )
     return canvas
+
+
+def video_frame_time(cap) -> float:
+    seconds = cap.get(cv2.CAP_PROP_POS_MSEC) / 1000
+    frame_index = cap.get(cv2.CAP_PROP_POS_FRAMES) - 1
+    fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
+    return seconds if seconds > 0 or frame_index <= 0 else frame_index / fps
+
+
+def seek_video_frame(cap, seconds: float) -> bool:
+    """Grab the first frame at the requested clip time, checking its decoded timestamp."""
+    seconds = max(0.0, seconds)
+    rewind = 0.0
+    while True:
+        seek_at = max(0.0, seconds - rewind)
+        cap.set(cv2.CAP_PROP_POS_MSEC, seek_at * 1000)
+        ok = cap.grab()
+        if ok and (seek_at == 0 or video_frame_time(cap) <= seconds + 0.0005):
+            break
+        if seek_at == 0:
+            return False
+        rewind = max(1.0, rewind * 2)
+
+    while video_frame_time(cap) < seconds - 0.0005:
+        if not cap.grab():
+            return False
+    return True
 
 
 def redact_bystanders_frame(
@@ -198,8 +228,7 @@ def redact_bystanders_frame(
     if not cap.isOpened():
         raise ValueError("Could not open source clip for frame extraction.")
     try:
-        cap.set(cv2.CAP_PROP_POS_MSEC, max(0.0, frame_seconds) * 1000.0)
-        ok, frame = cap.read()
+        ok, frame = cap.retrieve() if seek_video_frame(cap, frame_seconds) else (False, None)
         if not ok or frame is None:
             raise ValueError("Could not seek to the requested timestamp in the clip.")
     finally:
@@ -208,8 +237,7 @@ def redact_bystanders_frame(
     h, w = frame.shape[:2]
     blurred_count = 0
     if face_detector is not None:
-        face_detector.setInputSize((w, h))
-        _, faces = face_detector.detect(frame)
+        faces = face_detector(frame)
         if faces is not None:
             tx1, ty1, tx2, ty2 = target_bbox if target_bbox and len(target_bbox) == 4 else (-1, -1, -1, -1)
             tcx, tcy = (tx1 + tx2) / 2.0, (ty1 + ty2) / 2.0
@@ -232,7 +260,7 @@ def redact_bystanders_frame(
                     cv2.rectangle(frame, (x1, y1), (x2, y2), (160, 175, 185), 1)
                     blurred_count += 1
 
-    # Highlight target box even if YuNet didn't re-hit on exact seek
+    # Highlight the recorded target box even if this pass misses it.
     if target_bbox and len(target_bbox) == 4:
         tx1, ty1, tx2, ty2 = [max(0, int(v)) for v in target_bbox]
         if tx2 > tx1 and ty2 > ty1:

@@ -57,7 +57,7 @@ def run() -> None:
         with TestClient(app) as client:
             health = client.get("/api/health").json()
             assert health["status"] == "local" and health["cloud"] == "disabled"
-            assert health["models"]["face"] == "YuNet local weights"
+            assert health["models"]["face"] in {"InsightFace SCRFD-10GF", "YuNet local weights"}
             assert client.get("/api/auth/bootstrap").json()["needsAdministrator"] is True
             assert client.get("/api/clips").status_code == 401
             assert client.get("/api/health").headers["x-content-type-options"] == "nosniff"

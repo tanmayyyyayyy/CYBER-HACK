@@ -38,7 +38,7 @@ from reportlab.lib.utils import ImageReader
 from reportlab.pdfgen import canvas
 
 from backend import analysis, auth, blockchain, forensics, store, streams
-from backend.face_enhancement import enhance
+from backend.face_enhancement import enhance, enhance_nearby, quality
 from backend.security import encrypt_snapshot, sign_manifest, verify_manifest
 from security_portal import router as security_portal_router
 
@@ -55,6 +55,7 @@ analysis_pool: ThreadPoolExecutor | None = None
 
 def startup() -> None:
     global analysis_pool
+    cv2.setNumThreads(2)
     store.init_db()
     analysis_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="drishti-analysis")
     with store.connect() as db:
@@ -365,6 +366,7 @@ class AnalysisRequest(BaseModel):
     transaction_ref: str = Field(default="", max_length=40)
     case_ref: str = Field(default="", max_length=40)
     window_seconds: int = Field(default=30, ge=5, le=300)
+    quick_scan: bool = False
 
 
 class ReviewRequest(BaseModel):
@@ -716,7 +718,7 @@ def security_compliance_report(request: Request) -> StreamingResponse:
                 "openSourceSbom": {
                     "agplFree": find_spec("ultralytics") is None,
                     "optionalUltralyticsInstalled": find_spec("ultralytics") is not None,
-                    "optionalUltralyticsEnabled": os.environ.get("DRISHTI_ADVANCED_VISION") == "1",
+                    "optionalUltralyticsEnabled": os.environ.get("DRISHTI_ADVANCED_VISION", "1") == "1",
                     "models": analysis.model_status(),
                 },
             },
@@ -1032,27 +1034,30 @@ async def upload_clip(request: Request, filename: str, camera_id: str = "ATM-01"
 
 
 class FaceFusionRequest(BaseModel):
-    candidate_ids: list[str] = Field(min_length=2, max_length=12)
+    candidate_ids: list[str] = Field(min_length=1, max_length=40)
     same_person_confirmed: bool
+    single_track: bool = False
 
 
 @app.post("/api/face-enhancement")
 def enhance_confirmed_faces(payload: FaceFusionRequest) -> JSONResponse:
     ids = payload.candidate_ids
+    if not payload.single_track and not 4 <= len(ids) <= 5:
+        raise HTTPException(422, "Choose four or five source frames.")
     if not payload.same_person_confirmed or len(set(ids)) != len(ids):
         raise HTTPException(400, "Confirm distinct frames of the same person before combining them.")
     placeholders = ",".join("?" for _ in ids)
     with store.connect() as db:
         rows = db.execute(
-            f"""SELECT c.* FROM candidates c JOIN analyses a ON a.id = c.analysis_id
+            f"""SELECT c.*, a.result_json AS analysis_result FROM candidates c JOIN analyses a ON a.id = c.analysis_id
                 WHERE a.status = 'completed' AND c.id IN ({placeholders})
                 ORDER BY c.score DESC, c.id""",
             ids,
         ).fetchall()
     if len(rows) != len(ids):
         raise HTTPException(404, "One or more face crops are unavailable.")
-    if len({row["clip_id"] for row in rows}) < 2:
-        raise HTTPException(400, "Select confirmed face crops from at least two clips.")
+    if len({(row["clip_id"], row["frame_seconds"]) for row in rows}) != len(rows):
+        raise HTTPException(400, "Choose distinct source timestamps.")
     if any(row["track_id"] <= 0 for row in rows):
         raise HTTPException(400, "Use face crops assigned to a detected person track.")
     tracks = {}
@@ -1060,27 +1065,98 @@ def enhance_confirmed_faces(payload: FaceFusionRequest) -> JSONResponse:
         tracks.setdefault(row["clip_id"], set()).add((row["analysis_id"], row["track_id"]))
     if any(len(track_ids) > 1 for track_ids in tracks.values()):
         raise HTTPException(400, "Choose one person track per clip.")
+    if payload.single_track and (len(tracks) != 1 or any(row["review_status"] == "rejected" for row in rows)):
+        raise HTTPException(400, "Choose frames from one track and leave out excluded frames.")
     crops = [cv2.imread(row["image_path"]) for row in rows]
     if any(crop is None for crop in crops):
         raise HTTPException(409, "One or more source crops could not be opened.")
-    image, used = enhance(crops)
-    if len({rows[index]["clip_id"] for index in used}) < 2:
+    try:
+        detector = analysis.new_face_detector()
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc)) from exc
+    saved_landmarks = {}
+    for analysis_result in {row["analysis_id"]: row["analysis_result"] for row in rows}.values():
+        for item in store.json_load(analysis_result, {}).get("candidates", []):
+            points = item.get("metrics", {}).get("landmarks")
+            if isinstance(points, list) and len(points) == 5 and all(
+                isinstance(point, list) and len(point) == 2 for point in points
+            ):
+                saved_landmarks[item["id"]] = points
+
+    ranked = []
+    for row, crop in zip(rows, crops):
+        points = saved_landmarks.get(row["id"])
+        geometry = (points, row["confidence"]) if points else None
+        ranked.append((row, crop, quality(crop, detector, geometry), geometry))
+    ranked.sort(key=lambda item: item[2]["score"], reverse=True)
+    rows, crops, scores, geometries = zip(*ranked)
+    image, used = enhance(crops, [item["score"] for item in scores])
+    output_quality = scores[0]
+    fallback = None
+    if len(rows) < 4:
+        fallback = "Four compatible frames are needed for a combined picture."
+    elif len(used) < 4:
+        fallback = "Fewer than four frames passed alignment and pixel agreement."
+    else:
+        merged_quality = quality(image, detector, geometries[0])
+        if merged_quality["score"] < output_quality["score"]:
+            fallback = "The combined image scored below the best original."
+        else:
+            output_quality = merged_quality
+    nearby_times = []
+    if fallback and payload.single_track and len(rows) >= 4:
+        clip = _clip_or_404(rows[0]["clip_id"])
+        for index, (row, crop, score, geometry) in enumerate(ranked[:4]):
+            bbox = store.json_load(row["bbox_json"], [])
+            if not geometry or score["score"] <= 0 or len(bbox) != 4:
+                continue
+            composite, times = enhance_nearby(clip["path"], crop, bbox, row["frame_seconds"], score["score"])
+            if len(times) < 4:
+                continue
+            composite_quality = quality(composite, detector, geometry)
+            if composite_quality["score"] >= score["score"]:
+                image, used, nearby_times = composite, [index], times
+                output_quality, fallback = composite_quality, None
+                break
+    fused = not fallback
+    if fused:
+        image = forensics.label_enhanced_crop(image, fused=True)
+    else:
         image, used = crops[0], [0]
     ok, encoded = cv2.imencode(".png", image)
     if not ok:
         raise HTTPException(500, "The review image could not be encoded.")
     image_bytes = encoded.tobytes()
     accepted = [_public_candidate(dict(rows[index])) for index in used]
+    source_frames = []
+    if nearby_times:
+        anchor = accepted[0]
+        for seconds in sorted(nearby_times):
+            source_frames.append({
+                "analysisId": anchor["analysisId"], "clipId": anchor["clipId"], "trackId": anchor["trackId"],
+                "time": seconds,
+                "timeLabel": f"{int(seconds // 3600):02}:{int(seconds // 60 % 60):02}:{int(seconds % 60):02}.{round(seconds % 1 * 1000):03}",
+            })
     with store.connect() as db:
         store.append_audit(db, "faces.enhancement_reviewed", uuid.uuid4().hex, json.dumps({
             "confirmedCandidateIds": ids,
             "usedCandidateIds": [candidate["id"] for candidate in accepted],
+            "nearbySourceFrames": source_frames,
             "outputSha256": hashlib.sha256(image_bytes).hexdigest(),
+            "qualityScore": output_quality["score"],
+            "fallback": fallback,
         }), now())
     return JSONResponse({
         "imageUrl": "data:image/png;base64," + base64.b64encode(image_bytes).decode("ascii"),
         "sources": accepted,
-        "fused": len(used) > 1,
+        "fused": fused,
+        "sourceFrames": source_frames or accepted,
+        "nearbyFusion": bool(nearby_times),
+        "quality": output_quality,
+        "bestOriginalScore": scores[0]["score"],
+        "bestOriginal": _public_candidate(dict(rows[0])),
+        "frameScores": [{"id": row["id"], "score": item["score"]} for row, item in zip(rows, scores)],
+        "fallbackReason": fallback,
     }, headers={"Cache-Control": "private, no-store"})
 
 
@@ -1191,6 +1267,19 @@ def _queue_analysis_job(clip: dict, payload: AnalysisRequest) -> dict:
     job_id = uuid.uuid4().hex
     stamp = now()
     with store.connect() as db:
+        db.execute("BEGIN IMMEDIATE")
+        existing = db.execute(
+            """SELECT id, status FROM analyses WHERE clip_id=? AND transaction_time=? AND time_mode=?
+               AND clip_start_time=? AND transaction_ref=? AND case_ref=? AND window_seconds=?
+               AND COALESCE(json_extract(result_json, '$.scanMode'), 'detailed')=?
+               AND status IN ('queued','running') ORDER BY created_at LIMIT 1""",
+            (clip["id"], payload.transaction_time, payload.time_mode, payload.clip_start_time,
+             payload.transaction_ref.strip(), payload.case_ref.strip(), payload.window_seconds,
+             "quick" if payload.quick_scan else "detailed"),
+        ).fetchone()
+        if existing:
+            return {"id": existing["id"], "status": existing["status"], "clipId": clip["id"],
+                    "transactionTime": payload.transaction_time}
         db.execute(
             """INSERT INTO analyses(id,clip_id,transaction_time,time_mode,clip_start_time,transaction_ref,
                case_ref,window_seconds,status,result_json,error,created_at,updated_at)
@@ -1204,8 +1293,8 @@ def _queue_analysis_job(clip: dict, payload: AnalysisRequest) -> dict:
                 payload.transaction_ref.strip(),
                 payload.case_ref.strip(),
                 payload.window_seconds,
-                "running",
-                "{}",
+                "queued",
+                json.dumps({"scanMode": "quick" if payload.quick_scan else "detailed"}),
                 "",
                 stamp,
                 stamp,
@@ -1222,7 +1311,7 @@ def _queue_analysis_job(clip: dict, payload: AnalysisRequest) -> dict:
         )
     analysis_context = contextvars.copy_context()
     analysis_pool.submit(analysis_context.run, analysis.run_analysis, job_id)
-    return {"id": job_id, "status": "running", "clipId": clip["id"], "transactionTime": payload.transaction_time}
+    return {"id": job_id, "status": "queued", "clipId": clip["id"], "transactionTime": payload.transaction_time}
 
 
 @app.post("/api/analyses", status_code=202)
@@ -1356,8 +1445,8 @@ def candidate_frame(candidate_id: str) -> StreamingResponse:
     if not cap.isOpened():
         raise HTTPException(422, "Could not open this video for full-frame review.")
     try:
-        cap.set(cv2.CAP_PROP_POS_MSEC, max(0.0, float(candidate["frame_seconds"])) * 1000)
-        ok, frame = cap.read()
+        ok, frame = (cap.retrieve() if forensics.seek_video_frame(cap, float(candidate["frame_seconds"]))
+                     else (False, None))
         if not ok or frame is None:
             raise HTTPException(422, "Could not show this moment in the video.")
         encoded, jpeg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 92])

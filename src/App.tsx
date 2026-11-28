@@ -1,4 +1,4 @@
-import CrossCameraFaceReview from './FaceEnhancement';
+import CrossCameraFaceReview, { TrackFacePicture } from './FaceEnhancement';
 import { ChangeEvent, FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import {
@@ -1728,6 +1728,11 @@ function Review({ analysisId, analysisSummary, canAnchor, onOpenSearch, onToast,
   }, [analysisId, record?.cameraId, record?.status]);
 
   const selected = record?.candidates.find((candidate) => candidate.id === selectedId) || record?.candidates[0];
+  const trackFrames = selected && selected.trackId > 0 ? record?.candidates.filter(
+    (candidate) => candidate.trackId === selected.trackId && candidate.reviewStatus !== 'rejected',
+  ) ?? [] : [];
+  const markedTrackFrames = trackFrames.filter((candidate) => candidate.reviewStatus === 'selected');
+  const pictureFrames = markedTrackFrames.length ? markedTrackFrames : trackFrames;
   useEffect(() => { if (selected) setNote(selected.note || ''); }, [selected?.id]);
 
   const mark = async (status: Candidate['reviewStatus']) => {
@@ -1807,7 +1812,7 @@ function Review({ analysisId, analysisSummary, canAnchor, onOpenSearch, onToast,
 
   return <>
     <div className="review-context-bar"><div className="context-icon"><FileVideo2 size={18} /></div><div><strong>{active?.clipName || 'Loading clip record…'}</strong><span>{active?.caseRef ? `${active.caseRef} · ` : ''}{active?.transactionRef || 'No transaction reference'} · {active?.timeMode === 'absolute' ? 'Bank timestamp' : 'Clip-relative time'} {active?.transactionTime}</span></div><div className="context-window"><Clock3 size={15} /> ±{active?.windowSeconds || 0}s window</div><StatusBadge status={record?.status || active?.status || 'running'} />{record?.status === 'completed' && <><a className="button button-outline button-compact" href={`/api/evidence/${record.id}/manifest.json`} download><FileCode2 size={15} /> Manifest</a><a className="button button-outline button-compact" href={`/api/evidence/${record.id}/bsa63.pdf`} download><BadgeCheck size={15} /> BSA Sec 63</a><a className="button button-outline button-compact evidence-download" href={`/api/evidence/${record.id}.pdf`} download><Download size={15} /> PDF</a><a className="button button-primary button-compact" href={`/api/evidence/${record.id}/bundle.zip`} download><HardDrive size={15} /> Case Bundle (.zip)</a></>}</div>
-    {record?.status === 'running' && <div className="processing-banner"><LoaderCircle size={18} className="spin" /><div><strong>Reviewing the transaction window locally</strong><span>Detecting people, checking occlusion/shoulder-surfing, and indexing SFace 128-D embeddings.</span></div><span className="process-time">ANALYSIS RUNNING</span></div>}
+    {record && (record.status === 'queued' || record.status === 'running') && <div className="processing-banner"><LoaderCircle size={18} className="spin" /><div><strong>{record.status === 'queued' ? 'Waiting for the previous scan' : 'Scanning the transaction window'}</strong><span>{record.status === 'queued' ? 'This scan will start automatically.' : `${record.result.sampledFrames ?? 0} frames checked`}</span></div><span className="process-time">{record.status === 'queued' ? 'QUEUED' : `${record.result.progressPercent ?? 0}%`}</span></div>}
     {record?.status === 'failed' && <div className="error-banner"><AlertCircle size={18} /><div><strong>Analysis could not complete</strong><span>{record.error}</span></div></div>}
     {canAnchor && record?.status === 'completed' && <button type="button" className="button button-outline button-compact" disabled={anchoring} onClick={() => void anchorEvidence()}><Fingerprint size={15} />{anchoring ? 'Submitting fingerprint…' : 'Anchor manifest on blockchain'}</button>}
     {record?.status === 'completed' && <button type="button" className="button button-outline button-compact" onClick={() => characteristicsRef.current?.focus()}><Eye size={15} /> Physical characteristics</button>}
@@ -1869,6 +1874,8 @@ function Review({ analysisId, analysisSummary, canAnchor, onOpenSearch, onToast,
             )}
             <div className="selected-image"><img style={{ filter: `brightness(${brightness}%) contrast(${contrast}%)` }} src={showEnhanced ? selected.enhancedUrl : selected.imageUrl} alt={showEnhanced ? 'Enhanced candidate face crop' : 'Selected candidate face crop'} /><span className="selected-score">{Math.round(selected.score)}<small> QUALITY</small></span></div>
             <button className="text-button frame-link" onClick={() => inspectSourceAt(selected.time)}><Play size={14} /> Find this time in clip <span>{selected.timeLabel}</span></button>
+            {record && pictureFrames.length > 0 && <TrackFacePicture
+              key={pictureFrames.map((frame) => frame.id).join(',')} analysis={record} frames={pictureFrames} />}
             <QualityBars metrics={selected.metrics} />
             <div className="review-flags"><strong>Reliability flags</strong>{selected.flags.length ? selected.flags.map((flag) => <span className="flag-chip" key={flag}><AlertCircle size={13} />{flag}</span>) : <span className="clear-flag"><Check size={13} /> No occlusion or quality flags</span>}</div>
             <label className="review-note" htmlFor="investigator-note"><span>Investigator note</span><textarea id="investigator-note" name="note" value={note} maxLength={500} onChange={(event) => setNote(event.target.value)} placeholder="Add an observation or comparison note…" /></label>

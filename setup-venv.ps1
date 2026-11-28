@@ -85,6 +85,6 @@ if (Test-Path -LiteralPath $venvPython) {
 }
 
 Write-Host 'Python packages install ho rahe hain...' -ForegroundColor Cyan
-& $venvPython -m pip install -r (Join-Path $root 'requirements.txt')
+& $venvPython -m pip install -r (Join-Path $root 'requirements.txt') -r (Join-Path $root 'requirements-vision.txt')
 if ($LASTEXITCODE -ne 0) { Fail 'Python package installation fail hui. Upar ka error dekhein.' }
 Write-Host 'Python setup complete.' -ForegroundColor Green

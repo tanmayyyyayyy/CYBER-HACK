@@ -21,7 +21,7 @@ def main() -> int:
     print(f"{'OK' if python_ok else 'FAIL'} Python {sys.version.split()[0]} (3.11+ required)")
     if not python_ok:
         failures.append("Python")
-    for module in ("fastapi", "uvicorn", "cv2", "numpy", "reportlab", "cryptography"):
+    for module in ("fastapi", "uvicorn", "cv2", "numpy", "reportlab", "cryptography", "onnxruntime"):
         try:
             imported = importlib.import_module(module)
             version = getattr(imported, "__version__", "available")
@@ -34,7 +34,7 @@ def main() -> int:
         print(f"{'OK' if path else ('OPTIONAL' if executable in {'ffmpeg', 'ffprobe'} else 'FAIL')} {executable}: {path or 'not found'}")
         if not path and executable not in {"ffmpeg", "ffprobe"}:
             failures.append(executable)
-    for name in ("face_detection_yunet_2023mar.onnx", "person_detection_mediapipe_2023mar.onnx", "face_recognition_sface_2021dec.onnx"):
+    for name in ("det_10g.onnx", "yolo11n-pose.pt", "face_detection_yunet_2023mar.onnx", "person_detection_mediapipe_2023mar.onnx", "face_recognition_sface_2021dec.onnx"):
         path = ROOT / "models" / name
         print(f"{'OK' if path.is_file() else 'MISSING'} model {name}")
     for port in (5175, 8000, 8100):

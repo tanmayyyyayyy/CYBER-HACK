@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import math
 import threading
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -10,14 +11,17 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from backend import advanced_vision, store
+from backend import advanced_vision, forensics, store
+from backend.face_detection import load_scrfd
 
 MODEL_DIR = store.ROOT / "models"
 PERSON_MODEL = MODEL_DIR / "person_detection_mediapipe_2023mar.onnx"
 FACE_MODEL = MODEL_DIR / "face_detection_yunet_2023mar.onnx"
+SCRFD_MODEL = MODEL_DIR / "det_10g.onnx"
 SFACE_MODEL = MODEL_DIR / "face_recognition_sface_2021dec.onnx"
 SAMPLE_EVERY_SECONDS = 0.75
 MAX_SAMPLED_FRAMES = 1600
+case_scan_active = threading.Event()
 _model_lock = threading.Lock()
 _person_infer_lock = threading.Lock()
 _sface_infer_lock = threading.Lock()
@@ -60,7 +64,8 @@ def transaction_offset(analysis: dict) -> int:
 def model_status() -> dict[str, str]:
     return {
         "person": "OpenCV Zoo MediaPipe person detector (ONNX)" if PERSON_MODEL.is_file() else "OpenCV HOG fallback",
-        "face": "YuNet local weights" if FACE_MODEL.is_file() else "not installed",
+        "face": ("InsightFace SCRFD-10GF" if SCRFD_MODEL.is_file() else
+                 "YuNet local weights" if FACE_MODEL.is_file() else "not installed"),
         "embedding": "SFace 128-D local embeddings (ONNX)" if SFACE_MODEL.is_file() else "Histogram fallback",
     }
 
@@ -151,13 +156,46 @@ def detect_person_boxes(frame: np.ndarray) -> list[tuple[int, int, int, int, flo
     return [(x, y, x + w, y + h, float(weights[i])) for i, (x, y, w, h) in enumerate(rects)]
 
 
+def person_tracking_label(tracker):
+    detector = "MediaPipe" if PERSON_MODEL.is_file() else "OpenCV HOG"
+    return f"{detector} + {'ByteTrack' if tracker is not None else 'IoU'}"
+
+
 def new_face_detector():
+    if SCRFD_MODEL.is_file():
+        with _model_lock:
+            return load_scrfd(SCRFD_MODEL)
     if not FACE_MODEL.is_file():
         raise RuntimeError(
             "YuNet face model is missing. Run `python scripts/download_models.py` while online, "
             "then restart the analysis."
         )
-    return cv2.FaceDetectorYN.create(str(FACE_MODEL), "", (320, 320), 0.54, 0.3, 5000)
+    detector = cv2.FaceDetectorYN.create(str(FACE_MODEL), "", (320, 320), 0.54, 0.3, 5000)
+    lock = threading.Lock()
+
+    def detect(frame):
+        with lock:
+            detector.setInputSize((frame.shape[1], frame.shape[0]))
+            _, faces = detector.detect(frame)
+        return faces if faces is not None else np.empty((0, 15), dtype=np.float32)
+
+    return detect
+
+
+def detect_track_faces(detector, roi, has_track):
+    faces = detector(roi)
+    if has_track and not len(faces):
+        # A tighter pass lets tiny heads occupy more of the inference canvas.
+        faces = detector(roi[: max(1, roi.shape[0] // 2)])
+    return faces
+
+
+def usable_face_row(face_row):
+    width, height = face_row[2:4]
+    eye_distance = math.hypot(face_row[4] - face_row[6], face_row[5] - face_row[7])
+    min_side = min(width, height)
+    return (min_side >= 16 and eye_distance >= max(3.0, 0.12 * width)
+            and (min_side >= 24 or face_row[14] >= 0.65))
 
 
 def _get_sface_recognizer():
@@ -347,11 +385,15 @@ def _in_atm_zone(box: tuple[int, int, int, int], width: int, height: int) -> boo
 
 def run_analysis(analysis_id: str) -> None:
     with store.connect() as db:
+        db.execute("UPDATE analyses SET status='running', updated_at=? WHERE id=?", (utc_now(), analysis_id))
         analysis = store.row_dict(db.execute("SELECT * FROM analyses WHERE id = ?", (analysis_id,)).fetchone())
         clip = store.row_dict(db.execute("SELECT * FROM clips WHERE id = ?", (analysis["clip_id"],)).fetchone()) if analysis else None
     if not analysis or not clip:
         return
 
+    cap = None
+    written_crops = set()
+    case_scan_active.set()
     try:
         transaction = transaction_offset(analysis)
         start = max(0.0, transaction - analysis["window_seconds"])
@@ -362,12 +404,14 @@ def run_analysis(analysis_id: str) -> None:
         cap = cv2.VideoCapture(clip["path"])
         if not cap.isOpened():
             raise ValueError("OpenCV could not decode this clip. Try exporting it as MP4/H.264.")
-        fps = float(clip["fps"]) or 25.0
+        scan_mode = store.json_load(analysis["result_json"], {}).get("scanMode", "detailed")
         interval = 0.35 if end - start <= 120 else SAMPLE_EVERY_SECONDS
-        step = max(1, round(fps * interval))
-        frame_index = math.ceil(start * fps)
-        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
+        if scan_mode == "quick":
+            interval *= 2
+        has_frame = forensics.seek_video_frame(cap, start)
+        next_sample = start
         sampled = 0
+        last_progress = time.monotonic()
         next_track = 1
         previous: dict[int, tuple[int, int, int, int]] = {}
         candidates: list[dict] = []
@@ -384,38 +428,30 @@ def run_analysis(analysis_id: str) -> None:
         tamper_cues = 0
         person_frames = 0
         person_without_face_samples = []
-        byte_tracker = None
-        tracking_engine = "OpenCV person detector + IoU"
+        byte_tracker = advanced_vision.new_tracker()
+        tracking_engine = person_tracking_label(byte_tracker)
 
-        while sampled < MAX_SAMPLED_FRAMES and frame_index / fps <= end:
-            ok, frame = cap.read()
+        while has_frame and sampled < MAX_SAMPLED_FRAMES:
+            seconds = forensics.video_frame_time(cap)
+            if seconds > end:
+                break
+            if seconds < next_sample - 0.0005:
+                has_frame = cap.grab()
+                continue
+            ok, frame = cap.retrieve()
             if not ok:
                 break
-            seconds = frame_index / fps
-            frame_index += step
             sampled += 1
-            for _ in range(step - 1):
-                if not cap.grab():
-                    break
+            next_sample += interval
+            if next_sample <= seconds:
+                next_sample = seconds + interval
+            has_frame = cap.grab()
 
-            boxes = advanced_vision.person_boxes(frame)
-            if boxes is None:
-                if tracking_engine != "OpenCV person detector + IoU":
-                    tracking_engine = "OpenCV person detector + IoU"
-                    previous.clear()
-                    byte_tracker = None
-                boxes = detect_person_boxes(frame)
+            boxes = detect_person_boxes(frame)
+            if byte_tracker is None:
                 tracks, previous, next_track = match_tracks(boxes, previous, next_track)
             else:
-                if byte_tracker is None:
-                    byte_tracker = advanced_vision.new_tracker()
-                if byte_tracker is None:
-                    tracking_engine = "YOLOv8n + IoU"
-                    tracks, previous, next_track = match_tracks([box for box in boxes if box[4] >= .34], previous, next_track)
-                else:
-                    tracking_engine = "YOLOv8n + ByteTrack"
-                    tracks = advanced_vision.track_people(byte_tracker, boxes, frame)
-                    previous = {track_id: box[:4] for track_id, box in tracks}
+                tracks = advanced_vision.track_people(byte_tracker, boxes, frame)
             height, width = frame.shape[:2]
 
             # Track terminal presence & shoulder-surfing proximity
@@ -456,12 +492,11 @@ def run_analysis(analysis_id: str) -> None:
                 roi = frame[y1:y2, x1:x2]
                 if roi.size == 0:
                     continue
-                detector.setInputSize((roi.shape[1], roi.shape[0]))
-                _, faces = detector.detect(roi)
-                if faces is None:
-                    continue
+                faces = detect_track_faces(detector, roi, track_id != 0)
                 at_terminal = track_id != 0 and _in_atm_zone((x1, y1, x2, y2), width, height)
                 for face_row in faces:
+                    if not usable_face_row(face_row):
+                        continue
                     fx, fy, fw, fh = map(int, face_row[:4])
                     confidence = float(face_row[14])
                     face = roi[max(0, fy) : min(roi.shape[0], fy + fh), max(0, fx) : min(roi.shape[1], fx + fw)]
@@ -479,7 +514,9 @@ def run_analysis(analysis_id: str) -> None:
                     metrics["landmarks"] = landmarks.tolist()
                     image_name = f"{uuid.uuid4().hex}.jpg"
                     image_path = store.CANDIDATES / image_name
-                    cv2.imwrite(str(image_path), face, [cv2.IMWRITE_JPEG_QUALITY, 93])
+                    if not cv2.imwrite(str(image_path), face, [cv2.IMWRITE_JPEG_QUALITY, 93]):
+                        continue
+                    written_crops.add(image_path)
                     candidate_id = str(uuid.uuid4())
                     abs_bbox = [x1 + max(0, fx), y1 + max(0, fy), x1 + min(roi.shape[1], fx + fw), y1 + min(roi.shape[0], fy + fh)]
                     found.append(
@@ -499,6 +536,8 @@ def run_analysis(analysis_id: str) -> None:
                             "image_path": str(image_path),
                             "descriptor": descriptor,
                             "confidence": confidence,
+                            "association": abs((fx + fw / 2) / roi.shape[1] - 0.5)
+                                           + abs((fy + fh / 2) / roi.shape[0] - 0.20),
                         }
                     )
                     if track_id != 0:
@@ -508,7 +547,16 @@ def run_analysis(analysis_id: str) -> None:
             if any(track_id != 0 for track_id, _ in tracks) and not found:
                 person_without_face_samples.append(round(seconds, 3))
 
-            for candidate in found:
+            accepted_boxes = []
+            accepted_tracks = set()
+            for candidate in sorted(found, key=lambda item: (item.pop("association"), -item["confidence"])):
+                box = tuple(candidate["bbox"])
+                track_id = candidate["track_id"]
+                if track_id in accepted_tracks or any(_iou(box, prior_box) >= 0.5 for prior_box in accepted_boxes):
+                    continue
+                accepted_boxes.append(box)
+                if track_id > 0:
+                    accepted_tracks.add(track_id)
                 prior = next(
                     (c for c in candidates if candidate["track_id"] != 0 and c["track_id"] == candidate["track_id"] and candidate["time"] - c["time"] < 1.5),
                     None,
@@ -519,7 +567,14 @@ def run_analysis(analysis_id: str) -> None:
                     candidates.remove(prior)
                     candidates.append(candidate)
 
-        cap.release()
+            if time.monotonic() - last_progress >= 2:
+                progress = min(99, int(100 * (seconds - start) / (end - start)))
+                with store.connect() as db:
+                    db.execute("UPDATE analyses SET result_json=?, updated_at=? WHERE id=?", (
+                        json.dumps({"progressPercent": progress, "sampledFrames": sampled, "scanMode": scan_mode}), utc_now(), analysis_id,
+                    ))
+                last_progress = time.monotonic()
+
         candidates.sort(key=lambda item: item["score"], reverse=True)
         candidates = candidates[:40]
 
@@ -561,6 +616,7 @@ def run_analysis(analysis_id: str) -> None:
             "windowStart": round(start, 3),
             "windowEnd": round(end, 3),
             "sampledFrames": sampled,
+            "scanMode": scan_mode,
             "personFrames": person_frames,
             "personWithoutFaceSamples": person_without_face_samples,
             "trackingEngine": tracking_engine,
@@ -654,11 +710,15 @@ def run_analysis(analysis_id: str) -> None:
             )
             store.append_audit(db, "analysis.failed", analysis_id, str(exc)[:300], utc_now())
     finally:
+        case_scan_active.clear()
+        if cap is not None:
+            cap.release()
         with store.connect() as db:
-            referenced = {Path(row[0]).name for row in db.execute("SELECT image_path FROM candidates")}
-        for path in store.CANDIDATES.glob("*.jpg"):
-            if path.name not in referenced:
-                path.unlink(missing_ok=True)
+            referenced = {Path(row[0]) for row in db.execute(
+                "SELECT image_path FROM candidates WHERE analysis_id=?", (analysis_id,)
+            )}
+        for path in written_crops - referenced:
+            path.unlink(missing_ok=True)
 
 
 def fuse_candidate_frames(candidate: dict, reference: np.ndarray) -> tuple[np.ndarray, list[str]]:

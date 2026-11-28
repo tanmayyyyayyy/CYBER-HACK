@@ -8,7 +8,7 @@ Start it from the project root:
 python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000 --reload
 ```
 
-Analysis accepts clip-relative `HH:MM:SS`. It samples only the configured transaction window. YuNet face weights and the OpenCV Zoo MediaPipe person detector are local ONNX assets; OpenCV HOG is the person-detection fallback. Run `python scripts/download_models.py` once while online to fetch pinned/checksummed assets. No model is fetched at runtime. License notices are at the repository root.
+Analysis accepts clip-relative `HH:MM:SS`. It samples only the configured transaction window. InsightFace SCRFD-10GF is the primary face detector, with YuNet as the fallback when the SCRFD weights are absent. MediaPipe detects people and ByteTrack associates detections across frames. YOLO11n-pose supplies the live head-down cue. Run `python scripts/download_models.py --insightface --advanced-vision` once while online to fetch checksum-pinned assets. Inference runs locally. License notices are at the repository root.
 
 API routes require an approved local account session; only health and the first-run/auth endpoints are public. The first sign-up creates the administrator; later accounts require approval. Cookies are HTTP-only and same-site, and state-changing API requests require a CSRF token. This is local account control, not enterprise identity management. Keep it bound to loopback; add approved SSO/MFA, managed RBAC, and TLS before organizational deployment.
 
