@@ -53,6 +53,7 @@ export type Candidate = {
   reviewStatus: 'unreviewed' | 'selected' | 'rejected';
   note: string;
   imageUrl: string;
+  frameUrl: string;
   enhancedUrl: string;
   redactedFrameUrl: string;
 };

@@ -271,6 +271,7 @@ def _public_candidate(row: dict) -> dict:
         "reviewStatus": row["review_status"],
         "note": row["note"],
         "imageUrl": f"/api/candidates/{row['id']}/image",
+        "frameUrl": f"/api/candidates/{row['id']}/frame",
         "enhancedUrl": f"/api/candidates/{row['id']}/enhanced",
         "redactedFrameUrl": f"/api/candidates/{row['id']}/frame-redacted",
     }
@@ -1284,6 +1285,31 @@ def candidate_image(candidate_id: str) -> FileResponse:
         candidate["image_path"],
         media_type="image/jpeg",
         headers={"X-Content-Type-Options": "nosniff", "Cache-Control": "private, no-store"},
+    )
+
+
+@app.get("/api/candidates/{candidate_id}/frame")
+def candidate_frame(candidate_id: str) -> StreamingResponse:
+    """Show the unedited full video frame behind a candidate face crop."""
+    candidate = _candidate_or_404(candidate_id)
+    clip = _clip_or_404(candidate["clip_id"])
+    cap = cv2.VideoCapture(str(clip["path"]))
+    if not cap.isOpened():
+        raise HTTPException(422, "Could not open this video for full-frame review.")
+    try:
+        cap.set(cv2.CAP_PROP_POS_MSEC, max(0.0, float(candidate["frame_seconds"])) * 1000)
+        ok, frame = cap.read()
+        if not ok or frame is None:
+            raise HTTPException(422, "Could not show this moment in the video.")
+        encoded, jpeg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 92])
+        if not encoded:
+            raise HTTPException(500, "Could not prepare the full frame.")
+    finally:
+        cap.release()
+    return StreamingResponse(
+        io.BytesIO(jpeg.tobytes()),
+        media_type="image/jpeg",
+        headers={"Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff"},
     )
 
 
