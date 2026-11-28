@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import os
 import signal
 import socket
@@ -12,6 +13,7 @@ import time
 import urllib.error
 import urllib.request
 import webbrowser
+from io import StringIO
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -27,6 +29,95 @@ def port_busy(port: int) -> bool:
     with socket.socket() as sock:
         sock.settimeout(0.3)
         return sock.connect_ex(("127.0.0.1", port)) == 0
+
+
+def listening_pids(ports: set[int]) -> dict[int, set[int]]:
+    """Return Windows TCP listener PIDs for the requested local ports."""
+    result = subprocess.run(
+        ["netstat", "-ano", "-p", "TCP"], capture_output=True, text=True,
+        errors="replace", timeout=10, check=True,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
+    owners: dict[int, set[int]] = {port: set() for port in ports}
+    for line in result.stdout.splitlines():
+        fields = line.split()
+        if len(fields) != 5 or fields[0] != "TCP" or fields[3] != "LISTENING":
+            continue
+        try:
+            port = int(fields[1].rsplit(":", 1)[1])
+            pid = int(fields[4])
+        except (ValueError, IndexError):
+            continue
+        if port in owners:
+            owners[port].add(pid)
+    return owners
+
+
+def process_name(pid: int) -> str:
+    try:
+        result = subprocess.run(
+            ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
+            capture_output=True, text=True, errors="replace", timeout=10, check=True,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        row = next(csv.reader(StringIO(result.stdout)), [])
+        return row[0] if len(row) > 1 and row[1] == str(pid) else "unknown process"
+    except (OSError, subprocess.SubprocessError):
+        return "unknown process"
+
+
+def clear_occupied_ports() -> bool:
+    occupied = [(name, port) for name, port, _ in SERVICES if port_busy(port)]
+    if not occupied:
+        return True
+    print("\nYe ports pehle se use ho rahe hain:")
+    if os.name != "nt":
+        print(", ".join(f"{name} ({port})" for name, port in occupied), file=sys.stderr)
+        print("Existing service band karke dobara chalayein.", file=sys.stderr)
+        return False
+    ports = {port for _, port in occupied}
+    try:
+        owners = listening_pids(ports)
+    except (OSError, subprocess.SubprocessError):
+        print("Port use karne wale process ka pata nahi chal saka. Manually band karke dobara chalayein.", file=sys.stderr)
+        return False
+    if any(not owners[port] for port in ports):
+        print("Kisi port ka process nahi mila. Manually band karke dobara chalayein.", file=sys.stderr)
+        return False
+    for name, port in occupied:
+        for pid in sorted(owners[port]):
+            print(f"  {name} ({port}): {process_name(pid)} (PID {pid})")
+    pids = set().union(*owners.values())
+    if any(pid <= 4 or pid in {os.getpid(), os.getppid()} for pid in pids):
+        print("System ya current process mila; automatic stop allowed nahi hai.", file=sys.stderr)
+        return False
+    try:
+        answer = input("In processes ko stop karke Drishti chalu karein? [y/N]: ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return False
+    if answer not in {"y", "yes", "haan", "ha"}:
+        print("Theek hai. Koi existing process stop nahi hua.")
+        return False
+    # Do not stop a new process that took the port while the user was deciding.
+    if listening_pids(ports) != owners:
+        print("Port owner badal gaya. Dobara start karein.", file=sys.stderr)
+        return False
+    for pid in sorted(pids):
+        result = subprocess.run(
+            ["taskkill", "/PID", str(pid), "/F"], capture_output=True, text=True,
+            errors="replace", creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        if result.returncode != 0:
+            print(f"PID {pid} stop nahi hua: {result.stderr.strip() or result.stdout.strip()}", file=sys.stderr)
+            return False
+        print(f"Stopped PID {pid}.")
+    for _ in range(20):
+        if not any(port_busy(port) for port in ports):
+            return True
+        time.sleep(0.25)
+    print("Ports abhi bhi busy hain. Dobara try karein.", file=sys.stderr)
+    return False
 
 
 def ready(url: str) -> bool:
@@ -68,10 +159,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--no-browser", action="store_true")
     args = parser.parse_args()
-    occupied = [f"{name} ({port})" for name, port, _ in SERVICES if port_busy(port)]
-    if occupied:
-        print("Ports already in use: " + ", ".join(occupied), file=sys.stderr)
-        print("Close the old project/server and try again. No existing process was stopped.", file=sys.stderr)
+    if not clear_occupied_ports():
         return 1
 
     LOG_DIR.mkdir(exist_ok=True)
