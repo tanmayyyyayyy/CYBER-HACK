@@ -4,7 +4,8 @@ param(
   [switch]$DownloadModels,
   [switch]$PrepareDemo,
   [switch]$Check,
-  [switch]$NoBrowser
+  [switch]$NoBrowser,
+  [switch]$NoWatch
 )
 
 $ErrorActionPreference = 'Stop'
@@ -65,6 +66,11 @@ if ($Check) {
 
 $args = @('scripts/run_tool.py')
 if ($NoBrowser) { $args += '--no-browser' }
-Write-Host "`nStarting local services. Band karne ke liye Ctrl+C dabayein." -ForegroundColor Cyan
+if ($NoWatch) { $args += '--no-watch' }
+if ($NoWatch) {
+  Write-Host "`nStarting local services. Band karne ke liye Ctrl+C dabayein." -ForegroundColor Cyan
+} else {
+  Write-Host "`nStarting local services. Code save karne par auto refresh hoga. Band karne ke liye Ctrl+C dabayein." -ForegroundColor Cyan
+}
 & $venvPython @args
 exit $LASTEXITCODE

@@ -155,9 +155,46 @@ def stop(process: subprocess.Popen[bytes]) -> None:
         process.wait(timeout=3)
 
 
+def python_snapshot(directories: tuple[Path, ...]) -> dict[Path, tuple[int, int]]:
+    """Track only source files; uploads, models, and cache changes must not restart servers."""
+    snapshot = {}
+    for directory in directories:
+        for path in directory.rglob("*.py"):
+            try:
+                stat = path.stat()
+                snapshot[path] = (stat.st_mtime_ns, stat.st_size)
+            except OSError:
+                continue  # An editor may be replacing the file right now.
+    return snapshot
+
+
+def restart_entry(entry: tuple, command: list[str], env: dict[str, str], no_window: int, port: int) -> tuple:
+    name, process, log_path, handle = entry
+    stop(process)
+    handle.close()
+    for _ in range(20):
+        if not port_busy(port):
+            break
+        time.sleep(0.25)
+    else:
+        raise OSError(f"port {port} is still busy after stopping {name}")
+    with log_path.open("ab") as marker:
+        marker.write(b"\n--- Code changed; restarting service ---\n")
+    new_handle = log_path.open("ab")
+    try:
+        new_process = subprocess.Popen(command, cwd=ROOT, env=env, stdout=new_handle,
+                                       stderr=subprocess.STDOUT, creationflags=no_window)
+    except OSError:
+        new_handle.close()
+        raise
+    print(f"Restarting {name} (PID {new_process.pid})", flush=True)
+    return name, new_process, log_path, new_handle
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--no-browser", action="store_true")
+    parser.add_argument("--no-watch", action="store_true", help="Run without automatic code reloads.")
     args = parser.parse_args()
     if not clear_occupied_ports():
         return 1
@@ -169,9 +206,11 @@ def main() -> int:
     env["DRISHTI_BACKEND_PORT"] = "8000"
     env["DRISHTI_PORTAL_PORT"] = "8100"
     no_window = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    api_command = [sys.executable, "-m", "uvicorn", "backend.main:app", "--host", "127.0.0.1", "--port", "8000"]
+    portal_command = [sys.executable, "-m", "uvicorn", "security_portal.app:app", "--host", "127.0.0.1", "--port", "8100"]
     commands = (
-        ("API", [sys.executable, "-m", "uvicorn", "backend.main:app", "--host", "127.0.0.1", "--port", "8000"]),
-        ("Security portal", [sys.executable, "-m", "uvicorn", "security_portal.app:app", "--host", "127.0.0.1", "--port", "8100"]),
+        ("API", api_command),
+        ("Security portal", portal_command),
         ("Website", ["node", str(ROOT / "node_modules" / "vite" / "bin" / "vite.js"), "--host", "127.0.0.1", "--port", "5175"]),
     )
     processes: list[tuple[str, subprocess.Popen[bytes], Path, object]] = []
@@ -206,14 +245,39 @@ def main() -> int:
         print("Advanced tools: http://127.0.0.1:5175/legacy?tab=desk")
         print("Security portal: http://127.0.0.1:5175/security-portal")
         print(f"Logs: {LOG_DIR}")
+        if not args.no_watch:
+            print("Auto refresh is on: website and Python code changes apply after save.")
         print("Press Ctrl+C to stop all three services.\n")
         if not args.no_browser:
             webbrowser.open("http://127.0.0.1:5175")
+        watch_dirs = (ROOT / "backend", ROOT / "security_portal")
+        snapshot = python_snapshot(watch_dirs) if not args.no_watch else {}
+        pending_change: float | None = None
+        reported_stops: set[str] = set()
         while True:
+            if not args.no_watch:
+                current = python_snapshot(watch_dirs)
+                if current != snapshot:
+                    snapshot = current
+                    pending_change = time.monotonic()
+                if pending_change is not None and time.monotonic() - pending_change >= 0.8:
+                    pending_change = None
+                    print("Python code badla; API aur security portal restart ho rahe hain...", flush=True)
+                    for index in (0, 1):
+                        try:
+                            processes[index] = restart_entry(processes[index], commands[index][1], env, no_window, SERVICES[index][1])
+                        except OSError as exc:
+                            print(f"{commands[index][0]} restart fail hua: {exc}", file=sys.stderr)
+                    reported_stops.clear()
+                    snapshot = python_snapshot(watch_dirs)
             for name, process, log_path, _ in processes:
                 if process.poll() is not None:
-                    print(f"{name} stopped (exit {process.returncode}).\n{tail(log_path)}", file=sys.stderr)
-                    return 1
+                    if args.no_watch or name == "Website":
+                        print(f"{name} stopped (exit {process.returncode}).\n{tail(log_path)}", file=sys.stderr)
+                        return 1
+                    if name not in reported_stops:
+                        print(f"{name} stopped. Python file theek karke save karein; auto-restart hoga.\n{tail(log_path)}", file=sys.stderr)
+                        reported_stops.add(name)
             time.sleep(0.5)
     except KeyboardInterrupt:
         print("\nStopping Drishti Tool...")
