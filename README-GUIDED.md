@@ -36,6 +36,8 @@ The first run creates `.venv`, installs Python and website packages, checks/down
 .\start-tool.ps1
 ```
 
+If you only need to prepare the Python environment, run `.\setup-venv.ps1`. It checks installed Python through `uv`, the Windows Python launcher, and commands on `PATH`, creates `.venv`, and installs the packages from `requirements.txt`. It accepts Python 3.11 or newer, including 3.14. To choose a specific installed version, use `.\setup-venv.ps1 -PythonVersion 3.14`. To rebuild an existing environment, add `-Recreate`. The startup script calls this setup automatically with `-Setup`.
+
 Optional switches: `-Check` checks dependencies without starting services; `-DownloadModels` rechecks model files; `-PrepareDemo` creates demo feeds; `-NoBrowser` leaves the browser closed. You can combine switches, for example `.\start-tool.ps1 -Setup -PrepareDemo`. Press **Ctrl+C** in the startup terminal to stop all services. Service logs are in `.startup-logs/` and are ignored by Git. If ports 8000, 8100, or 5175 are already occupied, the script stops with a message and leaves the existing process alone.
 
 Python 3.11+, Node.js 18+, npm, and preferably FFmpeg/FFprobe are required. PowerShell may require `Set-ExecutionPolicy -Scope Process Bypass` for the current terminal if script execution is disabled.

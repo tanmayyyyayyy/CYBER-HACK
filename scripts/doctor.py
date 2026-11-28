@@ -37,7 +37,7 @@ def main() -> int:
     for name in ("face_detection_yunet_2023mar.onnx", "person_detection_mediapipe_2023mar.onnx", "face_recognition_sface_2021dec.onnx"):
         path = ROOT / "models" / name
         print(f"{'OK' if path.is_file() else 'MISSING'} model {name}")
-    for port in (5174, 8000):
+    for port in (5175, 8000, 8100):
         print(f"INFO 127.0.0.1:{port}: {port_state(port)}")
     if failures:
         print("\nSetup is incomplete: " + ", ".join(failures))
