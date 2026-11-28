@@ -44,7 +44,7 @@ ALLOWED_EXTENSIONS = {
     ".mp4", ".avi", ".mov", ".mkv", ".wmv", ".flv", ".mpeg", ".mpg",
     ".dav", ".h264", ".264", ".ts", ".m4v", ".asf", ".vob",
 }
-MAX_UPLOAD_BYTES = 500_000_000
+MAX_UPLOAD_BYTES = 20_000_000_000
 LOCAL_ORIGINS = ["http://127.0.0.1:5174", "http://localhost:5174"]
 
 analysis_pool: ThreadPoolExecutor | None = None
@@ -953,7 +953,7 @@ async def upload_clip(request: Request, filename: str, camera_id: str = "ATM-01"
         raise HTTPException(415, "Use MP4, AVI, MOV, MKV, WMV, FLV, MPEG, MPG, or compatible DAV/H264/TS DVR exports.")
     content_length = request.headers.get("content-length")
     if content_length and content_length.isdigit() and int(content_length) > MAX_UPLOAD_BYTES:
-        raise HTTPException(413, "Video 500 MB se bada hai. 500 MB se chhota clip upload karein.")
+        raise HTTPException(413, "Video 20 GB se bada hai. Chhota clip upload karein.")
     if replace_clip_id:
         try:
             delete_clip(replace_clip_id)
@@ -967,7 +967,7 @@ async def upload_clip(request: Request, filename: str, camera_id: str = "ATM-01"
             async for chunk in request.stream():
                 size += len(chunk)
                 if size > MAX_UPLOAD_BYTES:
-                    raise HTTPException(413, "Video 500 MB se bada hai. 500 MB se chhota clip upload karein.")
+                    raise HTTPException(413, "Video 20 GB se bada hai. Chhota clip upload karein.")
                 output.write(chunk)
         if size == 0:
             raise HTTPException(400, "The uploaded clip is empty.")
@@ -1293,7 +1293,9 @@ def candidate_enhanced(candidate_id: str, label: int = 1) -> StreamingResponse:
     face_bgr = cv2.imread(candidate["image_path"])
     if face_bgr is None:
         raise HTTPException(404, "Candidate face file missing.")
-    enhanced = forensics.enhance_face_crop(face_bgr, label=bool(label))
+    face_bgr, sources = analysis.fuse_candidate_frames(candidate, face_bgr)
+    fused = len(sources) > 1
+    enhanced = forensics.enhance_face_crop(face_bgr, label=bool(label) or fused, fused=fused)
     ok, jpg = cv2.imencode(".jpg", enhanced, [cv2.IMWRITE_JPEG_QUALITY, 94])
     if not ok:
         raise HTTPException(500, "Could not encode enhanced image.")
@@ -1303,7 +1305,8 @@ def candidate_enhanced(candidate_id: str, label: int = 1) -> StreamingResponse:
         headers={
             "Cache-Control": "private, no-store",
             "X-Content-Type-Options": "nosniff",
-            "X-Forensic-Enhancement": "CLAHE-Bilateral-Unsharp-2x-ReviewOnly",
+            "X-Forensic-Enhancement": "MultiFrame-ReviewOnly" if fused else "CLAHE-Bilateral-Unsharp-2x-ReviewOnly",
+            "X-Forensic-Source-Candidates": ",".join(sources),
         },
     )
 

@@ -310,7 +310,7 @@ export type ReportsData = {
 
 let csrfToken = '';
 export const setCsrfToken = (value: string) => { csrfToken = value; };
-export const MAX_CLIP_BYTES = 500_000_000;
+export const MAX_CLIP_BYTES = 20_000_000_000;
 
 function errorDetail(detail: unknown, status: number): string {
   if (typeof detail === 'string' && detail.trim()) return detail;
@@ -340,7 +340,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 function uploadRequest(file: File, cameraId: string, replaceClipId: string, onProgress?: (percent: number) => void, signal?: AbortSignal): Promise<Clip> {
-  if (file.size > MAX_CLIP_BYTES) return Promise.reject(new Error('Video 500 MB se bada hai. Chhota clip upload karein.'));
+  if (file.size > MAX_CLIP_BYTES) return Promise.reject(new Error('Video 20 GB se bada hai. Chhota clip upload karein.'));
   if (signal?.aborted) return Promise.reject(new DOMException('Upload rok diya gaya.', 'AbortError'));
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
