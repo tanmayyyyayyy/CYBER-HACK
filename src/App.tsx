@@ -1,3 +1,4 @@
+import CrossCameraFaceReview from './FaceEnhancement';
 import { ChangeEvent, FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import {
@@ -1436,6 +1437,8 @@ function CaseDesk({ clips, cameras, analyses, health, events, onAddOrChange, onD
         <Stat label="Person tracks" value={peopleCount} detail="Across completed clips" icon={<UsersRound size={19} />} tone="amber" />
         <Stat label="Face candidates" value={reviewedCount} detail="SFace 128-D indexed" icon={<ScanFace size={19} />} tone="red" />
       </div>
+
+      <CrossCameraFaceReview analyses={analyses} />
 
       <div className="desk-grid">
         <section className="panel intake-panel">

@@ -469,6 +469,10 @@ class StreamState:
     welfare_anchor: tuple[float, float] | None = None
     welfare_track_id: int | None = None
     welfare_reported: bool = False
+    robbery_weapon: str = ""
+    robbery_hits: int = 0
+    robbery_sample_at: float = 0.0
+    robbery_alert_at: float = float("-inf")
     ring_buffer: collections.deque[np.ndarray] = field(default_factory=lambda: collections.deque(maxlen=120))
 
 
@@ -1394,7 +1398,24 @@ class LocalSurveillanceManager:
             self._record_camera_alert(state, canvas, message, kind=kind)
         return canvas
 
-    def _record_camera_alert(self, state: StreamState, frame: np.ndarray, reason: str, kind: str = "stream.camera_tamper") -> None:
+    def _check_robbery(self, state: StreamState, frame: np.ndarray, now: float) -> None:
+        if os.environ.get("DRISHTI_ROBBERY_VISION") != "1" or now - state.robbery_sample_at < 0.45:
+            return
+        weapon = advanced_vision.robbery_weapon(frame)
+        if weapon != state.robbery_weapon or now - state.robbery_sample_at > 2.0:
+            state.robbery_hits = 0
+        state.robbery_weapon = weapon
+        state.robbery_sample_at = now
+        state.robbery_hits = state.robbery_hits + 1 if weapon else 0
+        if state.robbery_hits < 3:
+            return
+        if now - state.robbery_alert_at >= 60 and self._record_camera_alert(
+            state, frame, f"Red Alert: suspected armed robbery ({weapon}) — verify live feed",
+            kind="stream.suspected_armed_robbery",
+        ):
+            state.robbery_alert_at = now
+
+    def _record_camera_alert(self, state: StreamState, frame: np.ndarray, reason: str, kind: str = "stream.camera_tamper") -> bool:
         incident_id = uuid.uuid4().hex
         stamp = _now_iso()
         photo = frame.copy()
@@ -1412,12 +1433,12 @@ class LocalSurveillanceManager:
             photo = cv2.hconcat([photo, sidebar])
         ok, encoded = cv2.imencode(".jpg", photo, [cv2.IMWRITE_JPEG_QUALITY, 92])
         if not ok:
-            return
+            return False
         contents = encoded.tobytes()
         digest = hashlib.sha256(contents).hexdigest()
         path = store.LIVE_EVIDENCE / f"inc-{incident_id}.jpg"
         camera_id, atm_id = state.meta["id"], state.meta["channelId"]
-        severity = "critical" if interference else "warning"
+        severity = "critical" if interference or kind == "stream.suspected_armed_robbery" else "warning"
         summary = (f"{reason} at {atm_id}. " + ("Recent face attached for review." if face is not None else "No recent face available.")) if interference else f"{atm_id} · {reason}"
         try:
             store.LIVE_EVIDENCE.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -1432,13 +1453,14 @@ class LocalSurveillanceManager:
                 store.append_audit(db, "camera.interference_flagged" if interference else kind, incident_id, f"{summary} Snapshot SHA-256 {digest}.", stamp)
         except Exception:
             logger.exception("Could not save camera incident %s", incident_id)
-            return
+            return False
         if not interference:
-            return
+            return True
         _dispatch_security_bridge({"camera_id": camera_id, "atm_id": atm_id, "stage": "escalate",
                                    "rule_code": "RULE_2_ATM_TAMPER_OR_FORCE", "incident_kind": kind,
                                    "severity": "critical", "summary": summary,
                                    "snapshot_url": f"/api/live-incidents/{incident_id}/image", "snapshot_sha256": digest})
+        return True
 
     def _placeholder_jpeg(self, state: StreamState, message: str, detail: str = "") -> bytes:
         canvas = np.full((360, 640, 3), (17, 36, 52), dtype=np.uint8)
@@ -1473,6 +1495,9 @@ class LocalSurveillanceManager:
     @staticmethod
     def _reset_monitoring(state: StreamState) -> None:
         state.camera_tamper = CameraTamper()
+        state.robbery_weapon = ""
+        state.robbery_hits = 0
+        state.robbery_sample_at = 0.0
         state.latest_face_monotonic = 0.0
         state.byte_tracker = None
         state.zone_dwell = advanced_vision.ZoneDwell()
@@ -1602,6 +1627,9 @@ class LocalSurveillanceManager:
                     state.dropout_reported = False
 
                     annotated = self._annotate_frame(state, frame, detect=True, source_time=source_time)
+                    self._check_robbery(state, frame, delivered_at)
+                    if state.robbery_hits >= 3:
+                        state.alert_state = "alert"
                     ok_jpg, jpg = cv2.imencode(".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, 78])
                     if ok_jpg:
                         with self._lock:
