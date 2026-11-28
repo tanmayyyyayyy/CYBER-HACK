@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react';
-import { api, type Analysis, type AuthUser, type Candidate, type Clip, formatDuration, formatBytes } from './api';
+import { useEffect, useRef, useState } from 'react';
+import { api, MAX_CLIP_BYTES, type Analysis, type AuthUser, type Candidate, type Clip, formatDuration, formatBytes } from './api';
 import '@fontsource/noto-sans/400.css';
 import '@fontsource/noto-sans/700.css';
 import '@fontsource/noto-sans-devanagari/400.css';
@@ -10,7 +10,7 @@ const steps = ['Login', 'Naya case', 'Video upload', 'File check', 'Transaction'
 type Draft = { step: number; caseNumber: string; atmId: string; clipId: string; analysisId: string; selectedId: string; uncertain: boolean; reviewed: boolean; timeMode: 'clip' | 'absolute'; transactionTime: string; clipStart: string; windowSeconds: number; note: string };
 const fresh: Draft = { step: 1, caseNumber: '', atmId: '', clipId: '', analysisId: '', selectedId: '', uncertain: false, reviewed: false, timeMode: 'clip', transactionTime: '', clipStart: '', windowSeconds: 30, note: '' };
 function savedDraft(): Draft { try { return { ...fresh, ...JSON.parse(localStorage.getItem('drishti-tool-draft') || '{}') }; } catch { return fresh; } }
-function message(error: unknown) { return error instanceof Error ? error.message : 'Kuch galat hua. Dobara koshish karein.'; }
+function message(error: unknown) { return error instanceof Error && error.name === 'AbortError' ? 'Upload ka wait roka gaya. Server par file check kuch der chal sakta hai.' : error instanceof Error ? error.message : 'Kuch galat hua. Dobara koshish karein.'; }
 
 export default function App() {
   const [user, setUser] = useState<AuthUser | null>(null);
@@ -22,9 +22,14 @@ export default function App() {
   const [matches, setMatches] = useState<(Candidate & { similarity: number; filename: string })[]>([]);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const [uploadPercent, setUploadPercent] = useState(0);
+  const [uploadSeconds, setUploadSeconds] = useState(0);
+  const uploadController = useRef<AbortController | null>(null);
   const [authMode, setAuthMode] = useState<'login' | 'signup'>('login');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
   const [displayName, setDisplayName] = useState('');
   const [pending, setPending] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
@@ -37,8 +42,14 @@ export default function App() {
 
   useEffect(() => { localStorage.setItem('drishti-tool-draft', JSON.stringify(draft)); }, [draft]);
   useEffect(() => {
+    if (!uploading) return;
+    const started = Date.now();
+    const timer = window.setInterval(() => setUploadSeconds(Math.floor((Date.now() - started) / 1000)), 1000);
+    return () => window.clearInterval(timer);
+  }, [uploading]);
+  useEffect(() => {
     let alive = true;
-    api.authBootstrap().then(async (result) => { if (!alive) return; setSetup(result.needsAdministrator); if (result.authenticated) { const session = await api.authMe(); if (alive) setUser(session.user); } }).catch(() => { if (alive) setError('Local server se connection nahi bana. Backend start karein.'); }).finally(() => { if (alive) setLoading(false); });
+    api.authBootstrap().then(async (result) => { if (!alive) return; setSetup(result.needsAdministrator); if (result.needsAdministrator) setAuthMode('signup'); if (result.authenticated) { const session = await api.authMe(); if (alive) setUser(session.user); } }).catch(() => { if (alive) setError('Local server se connection nahi bana. Backend start karein.'); }).finally(() => { if (alive) setLoading(false); });
     return () => { alive = false; };
   }, []);
   useEffect(() => { if (user) api.clips().then(setClips).catch((err) => setError(message(err))); }, [user]);
@@ -54,11 +65,23 @@ export default function App() {
   const submitAuth = (event: React.FormEvent) => { event.preventDefault(); void run(async () => {
     if (authMode === 'login') { const result = await api.authLogin(email, password); setUser(result.user); }
     else { const result = await api.authSignup(displayName, email, password); if (result.approvalRequired) { setPending(true); setAuthMode('login'); } else setUser(result.user); }
+    setShowPassword(false);
   }); };
-  const upload = (file: File | undefined) => { if (!file) return; void run(async () => {
-    if (file.size > 500 * 1024 * 1024) throw new Error('Video 500 MB se bada hai. Chhota clip export karein.');
-    const result = await api.upload(file, 'ATM-01'); setClips((items) => [result, ...items]); update({ clipId: result.id, analysisId: '', selectedId: '', reviewed: false, uncertain: false }); go(3);
-  }); };
+  const upload = (file: File | undefined) => {
+    if (!file) return;
+    if (file.size > MAX_CLIP_BYTES) { setError('Video 500 MB se bada hai. Chhota clip upload karein.'); return; }
+    const controller = new AbortController();
+    uploadController.current = controller;
+    setUploading(true);
+    setUploadPercent(0);
+    setUploadSeconds(0);
+    void run(async () => {
+      const result = await api.upload(file, 'ATM-01', '', setUploadPercent, controller.signal);
+      setClips((items) => [result, ...items]);
+      update({ clipId: result.id, analysisId: '', selectedId: '', reviewed: false, uncertain: false });
+      go(3);
+    }).finally(() => { setUploading(false); uploadController.current = null; });
+  };
   const scan = () => void run(async () => {
     if (!clip) throw new Error('Pehle video chunein.');
     if (!draft.transactionTime) throw new Error('Transaction ka time batayein.');
@@ -74,11 +97,55 @@ export default function App() {
   const search = () => void run(async () => { if (draft.selectedId) { const result = await api.search(draft.selectedId); setMatches(result.matches); } go(8); });
 
   if (loading) return <main className="center"><p>Drishti khul raha hai…</p></main>;
-  if (!user) return <main className="auth-layout"><div className="auth-brand"><img src="/assets/drishti-logo-original.png" alt="Drishti Digital Forensics" /><h1>Investigation yahan se shuru hoti hai.</h1><p>ATM video ko step by step dekhein aur apni jaanch record karein.</p></div><div className="auth-box"><span className="overline">Local access</span><h2>{authMode === 'login' ? 'Login karein' : setup ? 'Admin account banayein' : 'Account banayein'}</h2><p>Sirf authorised investigator ya admin ke liye.</p><form onSubmit={submitAuth}>{authMode === 'signup' && <label>Aapka naam<input required value={displayName} onChange={(e) => setDisplayName(e.target.value)} autoComplete="name" /></label>}<label>Email<input required type="email" value={email} onChange={(e) => setEmail(e.target.value)} autoComplete="username" /></label><label>Password<input required type="password" minLength={8} value={password} onChange={(e) => setPassword(e.target.value)} autoComplete={authMode === 'login' ? 'current-password' : 'new-password'} /></label><button className="primary" disabled={busy}>{busy ? 'Rukiye…' : authMode === 'login' ? 'Login' : 'Account banayein'}</button></form>{pending && <p className="notice">Account bana hai. Admin approval ke baad login karein.</p>}{error && <p role="alert" className="error">{error}</p>}<button className="link-button" onClick={() => setAuthMode(authMode === 'login' ? 'signup' : 'login')}>{authMode === 'login' ? 'Naya account banayein' : 'Login par wapas'}</button></div></main>;
+  if (!user) return <main className="auth-layout">
+    <div className="auth-brand">
+      <img src="/assets/drishti-logo-original.png" alt="Drishti Digital Forensics" />
+      <h1>Investigation yahan se shuru hoti hai.</h1>
+      <p>ATM video ko step by step dekhein aur apni jaanch record karein.</p>
+    </div>
+    <div className="auth-box">
+      <span className="overline">Local access</span>
+      <h2>{authMode === 'login' ? 'Login karein' : setup ? 'Admin account banayein' : 'Account banayein'}</h2>
+      <p>Sirf authorised investigator ya admin ke liye.</p>
+      <form onSubmit={submitAuth}>
+        {authMode === 'signup' && <label>Aapka naam<input required value={displayName} onChange={(e) => setDisplayName(e.target.value)} autoComplete="name" /></label>}
+        <label>Email<input required type="email" value={email} onChange={(e) => setEmail(e.target.value)} autoComplete="username" /></label>
+        <div className="password-field">
+          <label htmlFor="auth-password">Password</label>
+          <div className="password-input">
+            <input id="auth-password" required type={showPassword ? 'text' : 'password'} minLength={authMode === 'signup' ? 12 : 1} maxLength={256} value={password} onChange={(e) => setPassword(e.target.value)} autoComplete={authMode === 'login' ? 'current-password' : 'new-password'} />
+            <button type="button" className="password-toggle" aria-label={showPassword ? 'Password chhupayein' : 'Password dikhayein'} aria-pressed={showPassword} onClick={() => setShowPassword((shown) => !shown)}>{showPassword ? 'Chhupayein' : 'Dikhayein'}</button>
+          </div>
+          {authMode === 'signup' && <small>Kam se kam 12 characters likhein.</small>}
+        </div>
+        <button className="primary" disabled={busy}>{busy ? 'Rukiye…' : authMode === 'login' ? 'Login' : 'Account banayein'}</button>
+      </form>
+      {pending && <p className="notice">Account bana hai. Admin approval ke baad login karein.</p>}
+      {error && <p role="alert" className="error">{error}</p>}
+      <button className="link-button" onClick={() => { setAuthMode(authMode === 'login' ? 'signup' : 'login'); setShowPassword(false); setError(''); setPending(false); }}>{authMode === 'login' ? 'Naya account banayein' : 'Login par wapas'}</button>
+    </div>
+  </main>;
 
   return <div className="shell"><header className="app-header"><div className="brand"><img src="/assets/drishti-logo-original.png" alt="Drishti Digital Forensics" /><span>Drishti</span></div><span className="header-case">{draft.caseNumber || 'Naya case'}</span><div className="header-right"><button onClick={() => setHelpOpen(true)}>Help / FAQ</button><a href="/legacy?tab=desk">Advanced tools</a><span>{user.displayName}</span><button onClick={() => void run(async () => { await api.authLogout(); setUser(null); })}>Log out</button></div></header><div className="app-body"><nav className="step-nav" aria-label="Case steps"><p>Jaanch ka raasta</p>{steps.slice(1).map((name, index) => <button key={name} disabled={index + 1 > draft.step || index + 1 === 5 && !draft.analysisId} className={draft.step === index + 1 ? 'active' : ''} onClick={() => go(index + 1)}><span>{index + 1}</span>{name}</button>)}</nav><main className="work"><div className="work-top"><span>STEP {draft.step} / 9</span><button onClick={() => { if (window.confirm('Naya case shuru karein? Is screen ka saved progress hat jayega.')) { setDraft(fresh); setAnalysis(null); setMatches([]); } }}>Naya case</button></div>{error && <div role="alert" className="error">{error}</div>}
     {draft.step === 1 && <section className="task"><h1>Naya case shuru karein</h1><p>Case number aur ATM ID likhein. Baaki cheezein agle screens par aayengi.</p><div className="fields"><label>Case number<input value={draft.caseNumber} onChange={(e) => update({ caseNumber: e.target.value })} placeholder="Jaise FIR-2026-014" maxLength={40} /></label><label>ATM ID<input value={draft.atmId} onChange={(e) => update({ atmId: e.target.value })} placeholder="Jaise ATM-014" maxLength={40} /></label></div><button className="primary" disabled={!draft.caseNumber.trim() || !draft.atmId.trim()} onClick={() => go(2)}>Aage badhein <span>→</span></button></section>}
-    {draft.step === 2 && <section className="task"><h1>Video chunein</h1><p>ATM ka video ya DVR export upload karein. Original file local machine par rakhi jayegi.</p><label className="upload-zone"><span className="upload-symbol">↑</span><strong>{busy ? 'Video upload ho raha hai…' : 'Video file yahan chunein'}</strong><small>MP4, AVI, MOV, MKV ya DVR export. Max 500 MB.</small><input type="file" accept="video/*,.dav,.h264,.264,.asf,.ts,.m4v,.vob" disabled={busy} onChange={(e) => upload(e.target.files?.[0])} /></label>{clips.length > 0 && <div className="compact-list"><h2>Pehle se available</h2>{clips.slice(0, 5).map((item) => <button key={item.id} onClick={() => { update({ clipId: item.id }); go(3); }}>{item.filename}<span>Chunein →</span></button>)}</div>}<Back onClick={() => go(1)} /></section>}
+    {draft.step === 2 && <section className="task">
+      <h1>Video chunein</h1>
+      <p>ATM ka video ya DVR export upload karein. Original file local machine par rakhi jayegi.</p>
+      <label className="upload-zone">
+        <span className="upload-symbol">↑</span>
+        <strong>{uploading ? uploadPercent < 100 ? `Video upload ho raha hai: ${uploadPercent}%` : 'Video check ho raha hai…' : 'Video file yahan chunein'}</strong>
+        <small>MP4, AVI, MOV, MKV ya DVR export. Max 500 MB.</small>
+        <input type="file" accept="video/*,.dav,.h264,.264,.asf,.ts,.m4v,.vob" disabled={busy} onChange={(e) => { upload(e.target.files?.[0]); e.currentTarget.value = ''; }} />
+      </label>
+      {uploading && <div className="upload-progress" role="status">
+        <progress max={100} value={uploadPercent} aria-label="Video upload progress" />
+        <p>{uploadPercent < 100 ? 'File bheji ja rahi hai.' : 'File pahunch gayi. Video ka format aur quality check ho rahe hain. Badi recording mein kuch minute lag sakte hain.'}</p>
+        <small>{Math.floor(uploadSeconds / 60)} min {uploadSeconds % 60} sec hue</small>
+        <button type="button" className="secondary" onClick={() => uploadController.current?.abort()}>Wait rok dein</button>
+      </div>}
+      {clips.length > 0 && <div className="compact-list"><h2>Pehle se available</h2>{clips.slice(0, 5).map((item) => <button key={item.id} onClick={() => { update({ clipId: item.id }); go(3); }}>{item.filename}<span>Chunein →</span></button>)}</div>}
+      <Back onClick={() => go(1)} />
+    </section>}
     {draft.step === 3 && <section className="task"><h1>File theek hai?</h1><p>Video ki jankari check karein. Original file ka record safe rehta hai.</p>{clip ? <><div className="file-preview"><video src={clip.videoUrl} poster={clip.posterUrl} controls preload="metadata" /><div><strong>{clip.filename}</strong><dl><dt>Video format</dt><dd>{clip.codec || 'Unknown'}</dd><dt>Size</dt><dd>{clip.width} × {clip.height}</dd><dt>Duration</dt><dd>{formatDuration(clip.duration)}</dd><dt>File size</dt><dd>{formatBytes(clip.sizeBytes)}</dd></dl></div></div><div className="notice">{clip.normalized ? 'Video ko chalne layak format mein badla gaya hai. Original safe hai.' : clip.previewReady ? 'Video chalne ke liye ready hai.' : 'Preview nahi chal raha. DVR software se MP4 (H.264) export karein, phir dobara upload karein.'}</div><button className="primary" disabled={!clip.previewReady} onClick={() => go(4)}>File sahi hai, aage badhein →</button></> : <p>Video nahi mila. Pichhle step par upload karein.</p>}<Back onClick={() => go(2)} /></section>}
     {draft.step === 4 && <section className="task"><h1>Transaction ka time batayein</h1><p>Isi time ke aas paas ka video scan hoga.</p><div className="choice-row"><button className={draft.timeMode === 'clip' ? 'chosen' : ''} onClick={() => update({ timeMode: 'clip', transactionTime: '' })}>Video ka time</button><button className={draft.timeMode === 'absolute' ? 'chosen' : ''} onClick={() => update({ timeMode: 'absolute', transactionTime: '' })}>Bank ka time</button></div><div className="fields"><label>{draft.timeMode === 'clip' ? 'Video mein time (HH:MM:SS)' : 'Bank transaction ka time'}<input required type={draft.timeMode === 'clip' ? 'text' : 'datetime-local'} placeholder={draft.timeMode === 'clip' ? '00:02:30' : undefined} pattern={draft.timeMode === 'clip' ? '\\d{2,3}:\\d{2}:\\d{2}' : undefined} value={draft.transactionTime} onChange={(e) => update({ transactionTime: e.target.value })} /></label>{draft.timeMode === 'absolute' && <label>CCTV video kab shuru hua?<input type="datetime-local" value={draft.clipStart} onChange={(e) => update({ clipStart: e.target.value })} /><small>Bank aur CCTV ki ghadi alag ho sakti hai. Dono time dekar sahi jagah dhoondhein.</small></label>}<label>Kitne time tak dekhein?<select value={draft.windowSeconds} onChange={(e) => update({ windowSeconds: Number(e.target.value) })}><option value={15}>15 second dono taraf</option><option value={30}>30 second dono taraf</option><option value={60}>1 minute dono taraf</option><option value={120}>2 minute dono taraf</option><option value={300}>5 minute dono taraf</option></select></label></div><button className="primary" disabled={busy || !draft.transactionTime || draft.timeMode === 'absolute' && !draft.clipStart} onClick={scan}>{busy ? 'Scan shuru ho raha hai…' : 'Video scan karein →'}</button><Back onClick={() => go(3)} /></section>}
     {draft.step === 5 && <section className="task"><h1>Video scan ho raha hai</h1><p>Logon ko track karke ATM ke aas paas ke frames dekhe ja rahe hain.</p><div className="scan-box"><span className="scan-ring" /><strong>{analysis?.status === 'failed' ? 'Scan poora nahi hua' : analysis?.status === 'completed' ? 'Scan poora hua' : 'Thoda rukiye…'}</strong><span>{analysis?.status === 'completed' ? `${analysis.result.peopleSeen || 0} person track aur ${analysis.candidates.length} face frames mile.` : analysis?.error || 'Analysis isi computer par chal raha hai.'}</span></div>{analysis?.status === 'completed' && <button className="primary" onClick={() => go(6)}>Person dekhein →</button>}{analysis?.status === 'failed' && <button className="secondary" onClick={() => go(4)}>Time badal kar dobara karein</button>}<Back onClick={() => go(4)} /></section>}
