@@ -1,4 +1,18 @@
-# Drishti — PS04 ATM CCTV Suspect Face Extraction & Forensic Evidence Platform
+# Drishti Tool — Guided ATM Video Investigation
+
+The website opens with a simple Hinglish path: **Login → Naya case → Video upload → File check → Transaction → Scan → Person chunein → Best frames → Dusri clips → Evidence sheet**. Each screen has one main task. The original specialist workspace remains at `/legacy?tab=desk`, and the security portal at `/security-portal`.
+
+**Windows quick start** from PowerShell in this repository:
+
+```powershell
+.\start-tool.ps1 -Setup
+```
+
+Later runs use `.\start-tool.ps1`. Open `http://127.0.0.1:5175`. The first run prepares the Python environment, website packages, and local models. If ports are busy, the launcher shows their process names and asks before stopping them. See [the guided setup and current limits](README-GUIDED.md) for details.
+
+The detailed capabilities below describe the retained advanced tools and backend.
+
+---
 
 **Drishti** is a local-first video analytics and forensic evidence review workstation built for **Rajasthan Police Cyber Security Hackathon 2026 — PS04 (ATM CCTV Suspect Face Extraction for Card & ATM Fraud Investigation)**.
 
@@ -104,8 +118,8 @@ Drishti AI integrates over authenticated loopback REST APIs (`POST /sec-api/brid
 ```
 
 - `./setup.sh`: creates `.venv`, installs `requirements.txt` & `npm` dependencies, downloads pinned checksum-verified ONNX models (`scripts/download_models.py`), and prepares 4 local demo feeds (`scripts/prepare_demo_feeds.py`).
-- `./start.sh`: runs `scripts/doctor.py` and starts Uvicorn (`127.0.0.1:8000`) + Vite (`127.0.0.1:5174`).
-  - **UI:** `http://127.0.0.1:5174`
+- `./start.sh`: runs `scripts/doctor.py` and starts the API (`127.0.0.1:8000`), security portal (`127.0.0.1:8100`), and Vite (`127.0.0.1:5175`).
+  - **UI:** `http://127.0.0.1:5175`
   - **OpenAPI Docs:** `http://127.0.0.1:8000/api/docs`
 
 **Single-Bundle Local Serving:**
@@ -118,17 +132,13 @@ npm run build
 
 ## Quick setup on Windows
 
-From PowerShell in the repository folder, with Python, Node.js, FFmpeg, and FFprobe on your command path:
+From PowerShell in the repository folder, with Python 3.11+, Node.js 18+, npm, and preferably FFmpeg/FFprobe installed:
 
 ```powershell
-python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
-npm.cmd ci
-.\.venv\Scripts\python.exe scripts/download_models.py
-.\.venv\Scripts\python.exe scripts/doctor.py
-npm.cmd run build
-.\.venv\Scripts\python.exe -m uvicorn backend.main:app --host 127.0.0.1 --port 8000
+.\start-tool.ps1 -Setup
 ```
+
+The launcher opens the guided website on port `5175` and starts the local API and security portal. Use `.\start-tool.ps1` after the first setup. `-Check` verifies dependencies without starting services; `-PythonVersion 3.14` selects a specific installed version during setup.
 
 For the blockchain demo, use `npm.cmd run blockchain:demo` to start the app on port `8001` with the local chain.
 
@@ -164,7 +174,7 @@ CYBER-HACK/
 │   ├── doctor.py            # Dependency & SHA-256 model integrity check
 │   ├── download_models.py   # Pinned ONNX model downloader
 │   ├── prepare_demo_feeds.py# Generates demo_feeds/ pilot CCTV MP4s
-│   ├── run_local.py         # Launches Uvicorn (8000) + Vite (5174) locally
+│   ├── run_local.py         # Launches Uvicorn (8000), portal (8100) + Vite (5175) locally
 │   ├── smoke_test.py        # End-to-end automated verification across API, RBAC, WAL, SFace, streams & bundles
 │   ├── restore_database.py  # Encrypted AES-256-GCM SQLite snapshot restore CLI
 │   └── run_ui_test_server.py# Local test server harness
